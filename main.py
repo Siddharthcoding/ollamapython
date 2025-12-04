@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 from supporting_functions import create_rag_chain, create_vector_store
+import time
 
 st.set_page_config(page_title="RAG with Ollama & ChromaDB", layout="wide")
 st.title("📄 RAG Project with Ollama & ChromaDB")
@@ -23,6 +24,7 @@ if "vector_store" not in st.session_state:
 if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
 
+st_time = time.time()
 # Process the uploaded document
 if process_btn and uploaded_file is not None:
     with st.spinner("Processing document... this may take a few minutes"):
@@ -38,8 +40,11 @@ if process_btn and uploaded_file is not None:
         st.session_state.rag_chain = create_rag_chain(st.session_state.vector_store)
 
         st.success("Document processed successfully! You can now ask questions.")
+end_time = time.time()
 
+st.write("Prcessed time:",end_time-st_time)
 
+st1_time = time.time()
 # Show Q&A section
 if st.session_state.rag_chain is not None:
     st.header("Ask your question")
@@ -65,3 +70,8 @@ if st.session_state.rag_chain is not None:
                     st.error(f"An error occurred: {e}")
 else:
     st.info("Please upload and process a PDF file to continue.")
+
+
+end1_time = time.time()
+
+st.write("Prcessed time:",end1_time-st1_time)

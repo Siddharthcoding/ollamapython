@@ -5,11 +5,11 @@ from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.llms import Ollama
 from langchain_core.prompts import ChatPromptTemplate
 
-from langchain_core.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
 
 
-llm_model = "llama3.2:1b"
+llm_model = "llama3"
 embedding_model = "nomic-embed-text"
 
 def create_vector_store(file_path):
@@ -26,7 +26,8 @@ def create_vector_store(file_path):
 
     vector_store = Chroma.from_documents(
         documents=splits,
-        embedding=embeddings
+        embedding=embeddings,
+        persist_directory="db"
     )
 
     return vector_store
@@ -43,6 +44,7 @@ def create_rag_chain(vector_store):
     </context>
 
     Question: {input}
+    Answer based only on the context.
     """)
 
     retriever = vector_store.as_retriever()
