@@ -3,8 +3,9 @@ import os
 import time
 import shutil
 import gc
+from langchain_community.llms import Ollama
 import uuid
-from supporting_functions import create_rag_chain, create_vector_store
+from supporting_functions import create_rag_chain, create_vector_store, set_persona
 
 st.set_page_config(page_title="RAG with Ollama & FAISS", layout="wide")
 st.title("📄 RAG Project with Ollama & FAISS")
@@ -19,6 +20,8 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
+if "persona" not in st.session_state:
+    st.session_state.persona = None
 if "last_file" not in st.session_state:
     st.session_state.last_file = None
 
@@ -40,6 +43,9 @@ def cleanup_faiss_files():
 with st.sidebar:
     st.header("Upload Your Document")
     uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    persona_choice = st.selectbox(
+    "Select your persona",
+    ("RESEARCH", "BUSINESS", "EDUCATION"),)
     process_btn = st.button("Process")
 
 # ---- Document Processing ----
@@ -59,7 +65,8 @@ if process_btn and uploaded_file is not None:
 
         # Create vector store and RAG chain
         st.session_state.vector_store = create_vector_store(file_path)
-        st.session_state.rag_chain = create_rag_chain(st.session_state.vector_store)
+        persona_choice = set_persona(st.session_state.persona)
+        st.session_state.rag_chain = create_rag_chain(st.session_state.vector_store,persona_choice)
 
         st.session_state.last_file = uploaded_file.name
 
@@ -86,8 +93,18 @@ if st.session_state.rag_chain:
 
             with st.spinner("🤖 Thinking..."):
                 try:
+                    llm = Ollama(model="llama3.2:1b")
+                    five = llm.invoke(f"""
+                    Rewrite this question into 3 sharper, more research-oriented versions:
+                    "{user_q}"
+                    """)
+                    chosen = llm.invoke(f"""Select the best question for retrieval.
+                    Return only the selected question:
+                    {five}
+                    """)
+                    st.info(f"Selected prompt(best):{chosen}")
                     # Stream answer tokens
-                    for chunk in st.session_state.rag_chain.stream({"input": user_q}):
+                    for chunk in st.session_state.rag_chain.stream({"input": chosen}):
                         if "answer" in chunk:
                             streamed_text += chunk["answer"]
                             answer_placeholder.markdown(streamed_text)

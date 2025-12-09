@@ -11,7 +11,7 @@ from langchain.chains import create_retrieval_chain
 
 
 llm_model = "llama3.2:1b"
-embedding_model = "nomic-embed-text"
+embedding_model = "mxbai-embed-large"
 PERSIST_DIR="db"
 FAISS_INDEX_PATH = "faiss.index"
 FAISS_STORE_PATH = "faiss_store.pkl"
@@ -54,11 +54,12 @@ def create_vector_store(file_path):
 
     return faiss_store
 
-def create_rag_chain(vector_store):
+def create_rag_chain(vector_store,persona):
     llm = Ollama(model="llama3.2:1b")
 
-
-    prompt = ChatPromptTemplate.from_template("""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",persona),
+        ("human","""
     You are an expert assistant. Answer the user's question using ONLY the information provided in the context below. 
     If the answer cannot be found in the context, respond exactly with: "The document does not contain this information."
 
@@ -76,6 +77,7 @@ def create_rag_chain(vector_store):
 
     Answer:
     """)
+    ])
 
 
     retriever = vector_store.as_retriever(search_kwargs={"k": 5})
@@ -83,3 +85,36 @@ def create_rag_chain(vector_store):
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
     return retrieval_chain
+
+
+def set_persona(choice):
+    if choice == "RESEARCH":
+        return """You are a research expert.
+Your answers must be:
+- highly technical
+- citation-style
+- structured  
+- formal"""
+    
+    elif choice == "BUSINESS":
+        return """
+You are a business consultant.
+Your answers must be:
+- simple
+- actionable
+- problem → solution oriented
+- clear and concise
+"""
+
+    elif choice == "EDUCATION":
+        return """
+You are a friendly teacher.
+Your answers must be:
+- easy to understand
+- step-by-step
+- include examples
+- friendly tone
+"""
+
+    return ""
+
