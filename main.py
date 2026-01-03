@@ -94,17 +94,17 @@ if st.session_state.rag_chain:
             with st.spinner("🤖 Thinking..."):
                 try:
                     llm = Ollama(model="llama3.2:1b")
-                    five = llm.invoke(f"""
-                    Rewrite this question into 3 sharper, more research-oriented versions:
-                    "{user_q}"
-                    """)
-                    chosen = llm.invoke(f"""Select the best question for retrieval.
-                    Return only the selected question:
-                    {five}
-                    """)
-                    st.info(f"Selected prompt(best):{chosen}")
+                    # five = llm.invoke(f"""
+                    # Rewrite this question into 3 sharper, more proper versions:
+                    # "{user_q}"
+                    # """)
+                    # chosen = llm.invoke(f"""Select the best question for retrieval.
+                    # Return only the selected question:
+                    # {five}
+                    # """)
+                    st.info(f"Selected prompt(best):{user_q}")
                     # Stream answer tokens
-                    for chunk in st.session_state.rag_chain.stream({"input": chosen}):
+                    for chunk in st.session_state.rag_chain.stream({"input": user_q}):
                         if "answer" in chunk:
                             streamed_text += chunk["answer"]
                             answer_placeholder.markdown(streamed_text)
