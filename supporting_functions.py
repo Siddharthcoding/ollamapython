@@ -56,12 +56,12 @@ def create_vector_store(file_path):
     return faiss_store
 
 def create_rag_chain(vector_store,persona):
-    if persona == "BUSINESS":
-        llm = Ollama(model="qwen2.5:7b")   # best for finance + math
+    if persona == "BUSINESS": 
+        llm = Ollama(model="qwen2.5:7b", temperature = 0.4)   # best for finance + math
     elif persona == "RESEARCH":
-        llm = Ollama(model="deepseek-r1:1.5b")
+        llm = Ollama(model="deepseek-r1:1.5b", temperature = 0.2)
     else:
-        llm = Ollama(model="llama3.2:1b")
+        llm = Ollama(model="llama3.2:1b", temperature = 0.5)
 
 
     prompt = ChatPromptTemplate.from_messages([
