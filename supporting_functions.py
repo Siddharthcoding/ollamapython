@@ -1,4 +1,4 @@
-from langchain_community.document_loaders import PyPDFLoader,PyMuPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OllamaEmbeddings
@@ -11,31 +11,31 @@ from langchain.chains import create_retrieval_chain
 
 
 llm_model = "llama3.2:1b"
-llm_model1 = "deepseek-r1:1.5b"
+llm_model1 = "deepseek-r1:8b"
 embedding_model = "mxbai-embed-large"
-PERSIST_DIR="db"
+PERSIST_DIR = "db"
 FAISS_INDEX_PATH = "faiss.index"
 FAISS_STORE_PATH = "faiss_store.pkl"
 
+
+
+# --------------------------------------------------
+# Vector Store Creation (First PDF)
+# --------------------------------------------------
 def create_vector_store(file_path):
-
-
-    if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_STORE_PATH):
-        print("🔄 Loading existing FAISS vector store...")
-        with open(FAISS_STORE_PATH,"rb") as f:
-            stored = pickle.load(f)
-        faiss_store = FAISS.load_local(
-            FAISS_INDEX_PATH,
-            stored["embedding"],
-            allow_dangerous_deserialization=True
-        )
-        return faiss_store
+    """Create initial FAISS vector store from first PDF"""
     
-    print("⚡ Creating new FAISS vector store... Processing PDF...")
+    print(f"⚡ Creating new FAISS vector store from {file_path}...")
 
 
     loader = PyMuPDFLoader(file_path)
     docs = loader.load()
+
+
+    # ✅ Add source metadata to track which PDF chunks came from
+    for doc in docs:
+        doc.metadata['source'] = os.path.basename(file_path)
+
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500,
@@ -43,176 +43,191 @@ def create_vector_store(file_path):
     )
     chunks = text_splitter.split_documents(docs)
 
+
     embeddings = OllamaEmbeddings(model=embedding_model)
+
 
     faiss_store = FAISS.from_documents(chunks, embeddings)
 
+
+    # ✅ Save to disk
     faiss_store.save_local(FAISS_INDEX_PATH)
-    with open(FAISS_STORE_PATH,"wb") as f:
-        pickle.dump({"embedding":embeddings},f)
+    with open(FAISS_STORE_PATH, "wb") as f:
+        pickle.dump({"embedding": embeddings}, f)
 
-    print("✔ FAISS index saved.")
 
+    print(f"✔ FAISS index created with {len(chunks)} chunks")
     return faiss_store
 
-def create_rag_chain(vector_store,persona):
-    if persona == "BUSINESS": 
-        llm = Ollama(model="qwen2.5:7b", temperature = 0.4)   # best for finance + math
+
+
+# --------------------------------------------------
+# Add Documents to Existing Vector Store
+# --------------------------------------------------
+def add_to_vector_store(existing_store, file_path):
+    """Add new PDF to existing FAISS vector store"""
+    
+    print(f"📄 Adding {file_path} to existing vector store...")
+
+
+    loader = PyMuPDFLoader(file_path)
+    docs = loader.load()
+
+
+    # ✅ Add source metadata
+    for doc in docs:
+        doc.metadata['source'] = os.path.basename(file_path)
+
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500,
+        chunk_overlap=100
+    )
+    chunks = text_splitter.split_documents(docs)
+
+
+    # ✅ Get embeddings (must use same model as original)
+    embeddings = OllamaEmbeddings(model=embedding_model)
+
+
+    # ✅ Create temporary store for new PDF
+    new_store = FAISS.from_documents(chunks, embeddings)
+
+
+    # ✅ Merge into existing store
+    existing_store.merge_from(new_store)
+
+
+    # ✅ Save updated store
+    existing_store.save_local(FAISS_INDEX_PATH)
+    with open(FAISS_STORE_PATH, "wb") as f:
+        pickle.dump({"embedding": embeddings}, f)
+
+
+    print(f"✔ Added {len(chunks)} chunks. Vector store updated.")
+    return existing_store
+
+
+
+# --------------------------------------------------
+# RAG Chain
+# --------------------------------------------------
+def create_rag_chain(vector_store, persona):
+
+
+    if persona == "BUSINESS":
+        llm = Ollama(model="qwen2.5:7b", temperature=0.4)
     elif persona == "RESEARCH":
-        llm = Ollama(model="deepseek-r1:1.5b", temperature = 0.2)
+        llm = Ollama(model="deepseek-r1:1.5b", temperature=0.2)
     else:
-        llm = Ollama(model="llama3.2:1b", temperature = 0.5)
+        llm = Ollama(model="llama3.2:1b", temperature=0.5)
 
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system",set_persona(persona)),
-        ("human","""
-    You are an expert assistant. Answer the user's question using ONLY the information provided in the context below. 
-    If the answer cannot be found in the context, respond exactly with: "The document does not contain this information."
+        ("system", set_persona(persona)),
+        ("human", """
+You are an expert assistant. Answer the user's question using ONLY the information provided in the context below. 
+If the answer cannot be found in the context, respond exactly with:
+"The document does not contain this information."
 
-    Context:
-    {context}
 
-    Question:
-    {input}
+Context:
+{context}
 
-    Answer format instructions:
-    - Provide a clear and concise answer.
-    - Use complete sentences.
-    - Do NOT include any information not in the context.
-    - If the answer is not present, respond exactly as instructed above.
 
-    Answer:
-    """)
+Question:
+{input}
+
+
+Answer format instructions:
+- Provide a clear and concise answer.
+- Use complete sentences.
+- Do NOT include any information not in the context.
+- If the answer is not present, respond exactly as instructed above.
+- When information comes from multiple documents, synthesize it coherently.
+
+
+Answer:
+""")
     ])
 
 
+    # ✅ Retrieve from multiple documents
     retriever = vector_store.as_retriever(search_kwargs={"k": 5})
     document_chain = create_stuff_documents_chain(llm, prompt)
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
+
     return retrieval_chain
 
 
+
+# --------------------------------------------------
+# Persona Prompts
+# --------------------------------------------------
 def set_persona(choice):
+
+
     if choice == "RESEARCH":
         return """You are a research expert.
 Your answers must be:
 - highly technical
 - citation-style
-- structured  
-- formal"""
-    
+- structured
+- formal
+- synthesize information from multiple sources when available
+"""
+
+
     elif choice == "BUSINESS":
         return """
 You are a business financial analyst and advisor. The user will upload detailed financial data for a chosen period (week/month/year) — e.g., transaction ledger, sales data, payroll, supplier invoices, bank statements, and/or P&L/Balance sheet. Do the following automatically after ingest:
+
 
 STRICT NUMERIC RULES:
 - Use ONLY numbers explicitly in the context.
 - Revenue = units × selling price.
 - Profit = revenue − cost.
 - Do NOT invent numbers for any product, cost, or employee.
-- If any required number is missing, respond exactly: "The document does not contain this information."
+- If any required number is missing, respond exactly:
+  "The document does not contain this information."
 - Show all calculation steps explicitly in the following format:
     Original value:
     Calculation:
     Result:
 - Never mix units with currency.
+- When analyzing multiple documents, consolidate data appropriately.
 
 1) Data assumptions
  - Detect currency, period, and aggregation level from file. If ambiguous, state your assumed currency and period.
  - Clean obvious duplicates or zero-value test rows and summarize data quality issues.
 
 2) Analysis (numbers-first)
- - Produce an Executive Summary (1-3 lines) that states whether the business was profitable or not in the period and the top reason(s).
- - Show a compact P&L summary: Total Revenue, COGS, Gross Profit, Operating Expenses (broken into payroll, rent, marketing, utilities, other), EBITDA, Net Profit.
- - Show simple cashflow snapshot: opening cash, cash collected, cash paid, closing cash, and short-term runway (months) at current burn.
- - Break down labour costs (total payroll, average per employee, top 3 salary cost centers).
- - Identify top 5 cost categories by % of revenue and top 5 highest/fastest-decreasing revenue products/channels.
+ - Produce an Executive Summary (1–3 lines).
+ - Compact P&L summary: Revenue, COGS, Gross Profit, Opex, EBITDA, Net Profit.
+ - Cashflow snapshot and runway.
+ - Labour cost breakdown.
+ - Top cost and revenue drivers.
+
 
 3) Insights & diagnostics
- - Flag 3–6 actionable problems (e.g., low gross margin on product X, payroll too high relative to revenue, receivables aging).
- - For each problem, provide root cause hypothesis and a concise data-backed signal (e.g., margin fell 8% because COGS rose 12% while price stayed flat).
+ - Flag 3–6 actionable problems with numeric signals.
 
-4) Recommendations (prioritized, quantified)
- - Provide Top 5 prioritized actions, each with: short description, expected financial impact (range), implementation effort (Low/Medium/High), time-to-impact (days/weeks/months).
- - Give a low-risk immediate action the owner can perform this week that reduces cash burn or increases revenue.
 
-5) Forecast & plan
- - Present a simple forecast for the next period (week/month/year as requested) with two scenarios: Base case (status quo) and Action case (if top 3 recommendations implemented). Show revenue, profit, and closing cash for each scenario.
- - Provide a 30–90 day action plan with owners (e.g., Owner, Finance, Sales) and concrete steps.
+4) Recommendations
+ - Top 5 prioritized actions with financial impact.
 
-6) KPIs & monitoring
- - Recommend 6 KPIs to track next period (with definitions and target values).
-
-7) Deliverable format
- - Start with Executive Summary (1-2 sentences).
- - Provide a compact numeric table for the P&L and cashflow.
- - Then a short diagnostics list (3–6 bullets).
- - Then prioritized recommendations (numbered).
- - Finish with Forecast table and 30–90 day plan checklist.
-
-Tone & style: short, actionable, business-first. Always show the numeric evidence (absolute and % change) next to each claim. 
-"""
-
-        return """
-        STRICT NUMERIC RULES:
-- Use only numbers explicitly in the context.
-- Revenue = units × selling price.
-- Profit = revenue − cost.
-- Do not invent numbers for any product, cost, or employee.
-- If a number is missing, respond exactly: "The document does not contain this information."
-- Always show calculation steps explicitly in the following format:
-
-Original value:
-Calculation:
-Result:
-
-You are a business financial analyst and advisor. The user will upload detailed financial data for a chosen period (week/month/year) — e.g., transaction ledger, sales data, payroll, supplier invoices, bank statements, and/or P&L/Balance sheet. Do the following automatically after ingest:
-
-1) Data assumptions
- - Detect currency, period, and aggregation level from file. If ambiguous, state your assumed currency and period.
- - Clean obvious duplicates or zero-value test rows and summarize data quality issues.
-
-2) Analysis (numbers-first)
- - Produce an Executive Summary (1-3 lines) that states whether the business was profitable or not in the period and the top reason(s).
- - Show a compact P&L summary: Total Revenue, COGS, Gross Profit, Operating Expenses (broken into payroll, rent, marketing, utilities, other), EBITDA, Net Profit.
- - Show simple cashflow snapshot: opening cash, cash collected, cash paid, closing cash, and short-term runway (months) at current burn.
- - Break down labour costs (total payroll, average per employee, top 3 salary cost centers).
- - Identify top 5 cost categories by % of revenue and top 5 highest/fastest-decreasing revenue products/channels.
-
-3) Insights & diagnostics
- - Flag 3–6 actionable problems (e.g., low gross margin on product X, payroll too high relative to revenue, receivables aging).
- - For each problem, provide root cause hypothesis and a concise data-backed signal (e.g., margin fell 8% because COGS rose 12% while price stayed flat).
-
-4) Recommendations (prioritized, quantified)
- - Provide Top 5 prioritized actions, each with: short description, expected financial impact (range), implementation effort (Low/Medium/High), time-to-impact (days/weeks/months).
- - Give a low-risk immediate action the owner can perform this week that reduces cash burn or increases revenue.
 
 5) Forecast & plan
- - Present a simple forecast for the next period (week/month/year as requested) with two scenarios: Base case (status quo) and Action case (if top 3 recommendations implemented). Show revenue, profit, and closing cash for each scenario.
- - Provide a 30–90 day action plan with owners (e.g., Owner, Finance, Sales) and concrete steps.
+ - Base vs Action scenario forecast.
+ - 30–90 day action plan.
+
 
 6) KPIs & monitoring
- - Recommend 6 KPIs to track next period (with definitions and target values).
+ - Recommend 6 KPIs.
 
-7) Deliverable format
- - Start with Executive Summary (1-2 sentences).
- - Provide a compact numeric table for the P&L and cashflow.
- - Then a short diagnostics list (3–6 bullets).
- - Then prioritized recommendations (numbered).
- - Finish with Forecast table and 30–90 day plan checklist.
 
-Tone & style: short, actionable, business-first. Always show the numeric evidence (absolute and % change) next to each claim. If data quality prevents a calculation, state exactly what’s missing.
-
-Output example (exact structure to follow):
-- Executive summary
-- Key numbers (table)
-- Problems found
-- Top actions (with impact, effort, time-to-impact)
-- 30–90 day plan (checklist)
-- Forecast (base vs action)
-- KPIs to track
+Tone & style: short, actionable, business-first.
 """
 
     elif choice == "EDUCATION":
@@ -223,7 +238,7 @@ Your answers must be:
 - step-by-step
 - include examples
 - friendly tone
+- combine information from multiple sources when relevant
 """
 
     return ""
-

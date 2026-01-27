@@ -1,19 +1,20 @@
 import streamlit as st
 import os
 import time
-import shutil
 import gc
-from langchain_community.llms import Ollama
 import uuid
-from supporting_functions import create_rag_chain, create_vector_store, set_persona
+from supporting_functions import create_rag_chain, create_vector_store, add_to_vector_store
+
 
 st.set_page_config(page_title="RAG with Ollama & FAISS", layout="wide")
 st.title("📄 RAG Project with Ollama & FAISS")
 
+
 st.write("""
-Upload a PDF and ask questions about its content.
+Upload multiple PDFs and ask questions about their combined content.
 This optimized version loads PDFs faster and avoids re-processing.
 """)
+
 
 # ---- Session state initialization ----
 if "vector_store" not in st.session_state:
@@ -21,111 +22,213 @@ if "vector_store" not in st.session_state:
 if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
 if "persona" not in st.session_state:
-    st.session_state.persona = None
-if "last_file" not in st.session_state:
-    st.session_state.last_file = None
+    st.session_state.persona = "EDUCATION"
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()  # ✅ Track all processed files
+if "last_question" not in st.session_state:
+    st.session_state.last_question = None
+if "pdf_processed" not in st.session_state:
+    st.session_state.pdf_processed = False
+if "answer_generated" not in st.session_state:
+    st.session_state.answer_generated = False  # ✅ Track if answer was shown
+if "persona_changed" not in st.session_state:
+    st.session_state.persona_changed = False  # ✅ Track persona changes
+
+
 
 # ---- Function to safely cleanup FAISS files ----
 def cleanup_faiss_files():
     st.session_state.vector_store = None
     st.session_state.rag_chain = None
-    gc.collect()  # Ensure Windows releases file handles
+    st.session_state.pdf_processed = False
+    st.session_state.processed_files = set()  # ✅ Clear file tracking
+    st.session_state.last_question = None
+    st.session_state.answer_generated = False
+    gc.collect()
+
 
     for f in ["faiss.index", "faiss_store.pkl"]:
         if os.path.exists(f):
             try:
                 os.remove(f)
             except PermissionError:
-                # Rename instead of deleting (Windows allows renaming open files)
                 os.rename(f, f"old_{uuid.uuid4()}_{f}")
+
+
 
 # ---- Sidebar ----
 with st.sidebar:
-    st.header("Upload Your Document")
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    st.header("Upload Your Documents")
+
+
+    # ✅ Enable multiple file upload
+    uploaded_files = st.file_uploader(
+        "Upload PDF(s)", 
+        type=["pdf"],
+        accept_multiple_files=True  # ✅ KEY CHANGE
+    )
+
+
     persona_choice = st.selectbox(
-    "Select your persona",
-    ("RESEARCH", "BUSINESS", "EDUCATION"),)
-    process_btn = st.button("Process")
+        "Select your persona",
+        ("RESEARCH", "BUSINESS", "EDUCATION"),
+        index=("RESEARCH", "BUSINESS", "EDUCATION").index(st.session_state.persona)
+    )
 
-# ---- Document Processing ----
-if process_btn and uploaded_file is not None:
 
-    # Cleanup FAISS to ensure fresh index
-    cleanup_faiss_files()
+    # ✅ Persona switch = rebuild ONLY RAG chain + trigger regeneration
+    if persona_choice != st.session_state.persona:
+        st.session_state.persona = persona_choice
+        st.session_state.persona_changed = True  # ✅ Mark that persona changed
+        if st.session_state.vector_store:
+            st.session_state.rag_chain = create_rag_chain(
+                st.session_state.vector_store,
+                st.session_state.persona
+            )
 
-    start_time = time.time()
-    with st.spinner("🚀 Processing PDF..."):
 
-        # Save file temporarily
+    # ✅ Show processed files count
+    if st.session_state.processed_files:
+        st.info(f"📚 {len(st.session_state.processed_files)} file(s) currently loaded")
+        with st.expander("View loaded files"):
+            for fname in st.session_state.processed_files:
+                st.write(f"✓ {fname}")
+
+
+    process_btn = st.button("Process Documents")
+    
+    # ✅ Clear all button
+    if st.button("Clear All Documents"):
+        cleanup_faiss_files()
+        st.success("All documents cleared!")
+        st.rerun()
+
+
+
+# ---- Document Processing (Multiple PDFs) ----
+if process_btn and uploaded_files:
+    
+    # ✅ Identify new files to process
+    uploaded_file_names = {f.name for f in uploaded_files}
+    new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
+    removed_files = st.session_state.processed_files - uploaded_file_names
+
+
+    # ✅ Handle removed files - rebuild from scratch if any removed
+    if removed_files:
+        st.warning(f"Detected {len(removed_files)} removed file(s). Rebuilding vector store...")
+        cleanup_faiss_files()
+        new_files = uploaded_files  # Process all files
+
+
+    if new_files:
+        start_time = time.time()
+        
         os.makedirs("temp_docs", exist_ok=True)
-        file_path = os.path.join("temp_docs", uploaded_file.name)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
 
-        # Create vector store and RAG chain
-        st.session_state.vector_store = create_vector_store(file_path)
-        persona_choice = set_persona(st.session_state.persona)
-        st.session_state.rag_chain = create_rag_chain(st.session_state.vector_store,persona_choice)
 
-        st.session_state.last_file = uploaded_file.name
+        # ✅ Process each new file
+        for idx, uploaded_file in enumerate(new_files):
+            with st.spinner(f"🚀 Processing {uploaded_file.name} ({idx+1}/{len(new_files)})..."):
+                
+                file_path = os.path.join("temp_docs", uploaded_file.name)
+                
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
 
-    end_time = time.time()
-    st.success(f"✔ PDF processed in **{end_time - start_time:.2f} seconds**")
+
+                # ✅ First file: create vector store
+                if st.session_state.vector_store is None:
+                    st.session_state.vector_store = create_vector_store(file_path)
+                else:
+                    # ✅ Subsequent files: merge into existing store
+                    st.session_state.vector_store = add_to_vector_store(
+                        st.session_state.vector_store,
+                        file_path
+                    )
+                
+                st.session_state.processed_files.add(uploaded_file.name)
+
+
+        # ✅ Create/update RAG chain with combined vector store
+        st.session_state.rag_chain = create_rag_chain(
+            st.session_state.vector_store,
+            st.session_state.persona
+        )
+        st.session_state.pdf_processed = True
+
+
+        st.success(f"✔ {len(new_files)} PDF(s) processed in **{time.time() - start_time:.2f} seconds**")
+        st.success(f"📚 Total documents loaded: {len(st.session_state.processed_files)}")
+
+
+    else:
+        st.info("📄 All uploaded PDFs already processed. Ready for questions.")
+
+
+elif process_btn and not uploaded_files:
+    st.warning("Please upload at least one PDF file.")
+
+
 
 # ---- Q&A Section ----
 if st.session_state.rag_chain:
 
     st.header("Ask a Question")
+    st.caption(f"Querying across {len(st.session_state.processed_files)} document(s)")
     user_q = st.text_input("Your question:")
 
     if st.button("Get Answer"):
-
         if not user_q.strip():
             st.warning("Please enter a question.")
         else:
-            start_time1 = time.time()
-            st.subheader("Answer (Streaming)")
-            answer_placeholder = st.empty()
+            st.session_state.last_question = user_q
+            st.session_state.answer_generated = True
+            st.session_state.persona_changed = False 
 
-            streamed_text = ""
-            final_response = None
 
-            with st.spinner("🤖 Thinking..."):
-                try:
-                    llm = Ollama(model="llama3.2:1b")
-                    # five = llm.invoke(f"""
-                    # Rewrite this question into 3 sharper, more proper versions:
-                    # "{user_q}"
-                    # """)
-                    # chosen = llm.invoke(f"""Select the best question for retrieval.
-                    # Return only the selected question:
-                    # {five}
-                    # """)
-                    st.info(f"Selected prompt(best):{user_q}")
-                    # Stream answer tokens
-                    for chunk in st.session_state.rag_chain.stream({"input": user_q}):
-                        if "answer" in chunk:
-                            streamed_text += chunk["answer"]
-                            answer_placeholder.markdown(streamed_text)
+    # ---- Auto-Generate Answer on Persona Change ----
+    if st.session_state.persona_changed and st.session_state.last_question and st.session_state.answer_generated:
+        st.session_state.persona_changed = False  
 
-                        if "context" in chunk:
-                            final_response = chunk  # capture final context
 
-                    # Show retrieved chunks (at least 5 if available)
-                    if final_response and "context" in final_response:
-                        context_chunks = final_response["context"]
-                        num_chunks = min(5, len(context_chunks))
-                        with st.expander(f"Retrieved Context (Top {num_chunks} Chunks)"):
-                            for i, doc in enumerate(context_chunks[:num_chunks], start=1):
-                                st.markdown(f"**Chunk {i}:**")
-                                st.info(doc.page_content)
+    # ---- Generate / Regenerate Answer ----
+    if st.session_state.last_question and st.session_state.answer_generated:
 
-                except Exception as e:
-                    st.error(f"Error: {e}")
 
-            end_time1 = time.time()
-            st.success(f"✔ Answered in **{end_time1 - start_time1:.2f} seconds**")
+        st.subheader(f"Answer ({st.session_state.persona})")
+        answer_placeholder = st.empty()
+        streamed_text = ""
+        final_response = None
+
+        with st.spinner("🤖 Thinking..."):
+            try:
+                for chunk in st.session_state.rag_chain.stream(
+                    {"input": st.session_state.last_question}
+                ):
+                    if "answer" in chunk:
+                        streamed_text += chunk["answer"]
+                        answer_placeholder.markdown(streamed_text)
+
+
+                    if "context" in chunk:
+                        final_response = chunk
+
+
+                if final_response and "context" in final_response:
+                    context_chunks = final_response["context"]
+                    num_chunks = min(5, len(context_chunks))
+                    with st.expander(f"Retrieved Context (Top {num_chunks} Chunks)"):
+                        for i, doc in enumerate(context_chunks[:num_chunks], 1):
+                            st.markdown(f"**Chunk {i}:**")
+                            # ✅ Show source document if available
+                            source = doc.metadata.get('source', 'Unknown')
+                            st.caption(f"Source: {source}")
+                            st.info(doc.page_content)
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+
 
 else:
-    st.info("Upload and process a PDF to begin.")
+    st.info("Upload and process PDF(s) to begin.")
