@@ -1,0 +1,224 @@
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head id="Head1"><title>
+
+</title><link href="inc/edu_style.css" type="text/css" rel="stylesheet" /></head>
+<body style="margin: 0px">
+    <form name="form1" method="post" action="CourseSelect.aspx" id="form1">
+<div>
+<input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value="" />
+<input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="" />
+<input type="hidden" name="__LASTFOCUS" id="__LASTFOCUS" value="" />
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="/wEPDwULLTE0OTQzOTA2OTYPZBYCAgMPZBYIAgMPDxYCHgRUZXh0BQgyMzA1MjkyMWRkAgUPDxYCHwAFFlNJRERIQVJUSCBLVU1BUiBNSVNIUkFkZAIHDzwrAAsBAA8WCB4IRGF0YUtleXMWAB4LXyFJdGVtQ291bnQCBh4JUGFnZUNvdW50AgEeFV8hRGF0YVNvdXJjZUl0ZW1Db3VudAIGZBYCZg9kFgwCAQ9kFgJmD2QWAgIBDw8WBB8ABRxDUy0zMDAwMyhDTiktQ1NfRU5EX05PVl8yMDI1Hg9Db21tYW5kQXJndW1lbnQFHENTLTMwMDAzKENOKS1DU19FTkRfTk9WXzIwMjVkZAICD2QWAmYPZBYCAgEPDxYEHwAFHUNTLTMwMDAxKERBQSktQ1NfRU5EX05PVl8yMDI1HwUFHUNTLTMwMDAxKERBQSktQ1NfRU5EX05PVl8yMDI1ZGQCAw9kFgJmD2QWAgIBDw8WBB8ABRxDUy0zMTAwMShTRSktQ1NfRU5EX05PVl8yMDI1HwUFHENTLTMxMDAxKFNFKS1DU19FTkRfTk9WXzIwMjVkZAIED2QWAmYPZBYCAgEPDxYEHwAFHEhTLTMwMTAxKEVFKS1DU19FTkRfTk9WXzIwMjUfBQUcSFMtMzAxMDEoRUUpLUNTX0VORF9OT1ZfMjAyNWRkAgUPZBYCZg9kFgICAQ8PFgQfAAUdQ1MtMzAwMDkoRE9TKS1DU19FTkRfTk9WXzIwMjUfBQUdQ1MtMzAwMDkoRE9TKS1DU19FTkRfTk9WXzIwMjVkZAIGD2QWAmYPZBYCAgEPDxYEHwAFHkNTLTMwMDEzKERNRFcpLUNTX0VORF9OT1ZfMjAyNR8FBR5DUy0zMDAxMyhETURXKS1DU19FTkRfTk9WXzIwMjVkZAIJD2QWBmYPZBYCAgEPZBYCAgEPEGQPFgECARYBEAUDNXRoBQE1ZxYBAgFkAgEPZBYCAgEPZBYCAgEPEGQQFQcKLS1TZWxlY3QtLRxDUy0zMDAwMyhDTiktQ1NfRU5EX05PVl8yMDI1HUNTLTMwMDAxKERBQSktQ1NfRU5EX05PVl8yMDI1HENTLTMxMDAxKFNFKS1DU19FTkRfTk9WXzIwMjUcSFMtMzAxMDEoRUUpLUNTX0VORF9OT1ZfMjAyNR1DUy0zMDAwOShET1MpLUNTX0VORF9OT1ZfMjAyNR5DUy0zMDAxMyhETURXKS1DU19FTkRfTk9WXzIwMjUVBwotLVNlbGVjdC0tCTI1MTEwNDAxMwkyNTExMDQwMTQJMjUxMTA0MDE1CTI1MTEwNDAxNgkyNTExMDQwMTkJMjUxMTA0MDI0FCsDB2dnZ2dnZ2cWAWZkAgIPZBYCAgEPZBYCAgEPEGQQFQAVABQrAwAWAGRkoPZvAurSHTamZaGlf2YYRZQl7dc=" />
+</div>
+
+<script type="text/javascript">
+//<![CDATA[
+var theForm = document.forms['form1'];
+if (!theForm) {
+    theForm = document.form1;
+}
+function __doPostBack(eventTarget, eventArgument) {
+    if (!theForm.onsubmit || (theForm.onsubmit() != false)) {
+        theForm.__EVENTTARGET.value = eventTarget;
+        theForm.__EVENTARGUMENT.value = eventArgument;
+        theForm.submit();
+    }
+}
+//]]>
+</script>
+
+
+<div>
+
+	<input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="324B4DB1" />
+	<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="/wEWEwLf+4wZAqbrhs4HAqbr4q0HAqbrjooHAqbrivIIAqbr9s0IAqbrkq4IAp3h0r4LAo2O+NAHApaO+NAHAuXzrKwDAse+o9gGAsWCx7YIAvqCx7YIAvuCx7YIAviCx7YIAs+Cx7YIAvqCi4AGAoLch4YMwplbetsm08u+TNMsUOns684wYw0=" />
+</div>
+    <table width="100%" height="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td>
+                
+<table id="Table6" cellspacing="0" cellpadding="0" width="100%" align="center" border="0">
+    <tr bgcolor="#003300">
+        <td colspan="2">
+            <table id="Table1" cellspacing="0" cellpadding="0" width="100%" align="center" border="0">
+                <tr>
+                    <td width="24%">
+                        <img src="images/logo.jpg" id="Header_Img3" height="80" />
+                    </td>
+                    <td class="mtext" align="center">
+                        <font color="white">KIIT - Digital Evaluation </font>
+                        <br /><br />
+                      </font><font color="white">STUDENT VIEW - END SEM - NOV 2025</font>
+                    </td>
+                    <td width="24%" align="right" h>
+                        <img src="images/edu.jpg" id="Header_Img1" height="80" />
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+</table>
+<script src="inc/disable_modern.js" type="text/javascript" defer></script>
+            </td>
+        </tr>
+        <tr bgcolor="#c2d6d7" height="4">
+            <td align="right">
+            </td>
+        </tr>
+        <tr bgcolor="#003300" height="20">
+            <td width="100%" align="right" class="bld">
+                <a href="Logout.aspx" style="text-decoration: none"><font color='#ffffff'>Logout</font></a>
+            </td>
+        </tr>
+        <tr bgcolor="#c2d6d7" height="4">
+            <td align="center">
+                <table width="100%" cellpadding="4" cellspacing="0" align="center">
+                    <tr>
+                        <td class="bld">
+                            ID Number:&nbsp;&nbsp;<span id="LblIdno" class="bld" style="color:#990000;">23052921</span>
+                        </td>
+                        <td class="bld" align="right">
+                            Name:&nbsp;&nbsp;<span id="LblName" class="bld" style="color:#990000;">SIDDHARTH KUMAR MISHRA</span>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+        <tr height="100%" valign="top">
+            <td valign="top" align="center" height="100%">
+                <table width="100%" height="100%" align="center" cellpadding="0" cellspacing="1"
+                    bgcolor="#c0c0c0">
+                    <tr bgcolor="#ffffff" valign="top">
+                        <td width="50%">
+                            <table width="100%" align="center" cellpadding="0" cellspacing="0">
+                                <tr>
+                                    <td width="50%" class="mtext" align="center">
+                                        INSTRUCTIONS FOR STUDENTS
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>
+                                        <font face="verdana">
+                                            1. Please select the respective course number for which you want to view the evaluated
+                                            answer script and click 'continue'
+                                            <br />
+                                            2. After you reach the default view of answer booklet, please select the page numbers
+                                            from left hand side pane to view respective pages.
+                                            <br />
+                                            3. All marks are displayed in the grid format with total marks and marks awarded
+                                            for each sub-sections of a question.
+                                            <br />
+                                            4. In case you have some issues with the marks awarded and would think of applying
+                                            for a recheck, first you need to select a question and then you need to mention
+                                            a comment as a reason you want to apply for recheck.
+                                            <br />
+                                            5. A valid reason is mandatory for applying recheck requests.
+                                            <br />
+                                            6. Recheck requests for marks correction are at the sole discretion of the evaluator.<br />
+                                            7. 
+                                        If you need any question to be rechecked, please ensure to submit all Recheck Requests 
+                                        for the subject together.&nbsp; Recheck Request will be locked after one submission.  
+
+                                        </font>
+                                        <br />
+                                         <b> SOLUTIONS FOR DOWNLOAD </b>
+                                       &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                                       &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <table cellspacing="0" cellpadding="4" rules="all" border="1" id="marksdwd" style="background-color:White;border-color:#3366CC;border-width:1px;border-style:None;border-collapse:collapse;">
+	<tr style="color:#CCCCFF;background-color:#003399;font-weight:bold;">
+		<td>&nbsp;</td>
+	</tr><tr style="color:#003399;background-color:White;">
+		<td>
+                                                        <a id="marksdwd_ctl02_dwnmarks" href="javascript:__doPostBack('marksdwd$ctl02$dwnmarks','')">CS-30003(CN)-CS_END_NOV_2025</a>
+                                                    </td>
+	</tr><tr style="color:#003399;background-color:White;">
+		<td>
+                                                        <a id="marksdwd_ctl03_dwnmarks" href="javascript:__doPostBack('marksdwd$ctl03$dwnmarks','')">CS-30001(DAA)-CS_END_NOV_2025</a>
+                                                    </td>
+	</tr><tr style="color:#003399;background-color:White;">
+		<td>
+                                                        <a id="marksdwd_ctl04_dwnmarks" href="javascript:__doPostBack('marksdwd$ctl04$dwnmarks','')">CS-31001(SE)-CS_END_NOV_2025</a>
+                                                    </td>
+	</tr><tr style="color:#003399;background-color:White;">
+		<td>
+                                                        <a id="marksdwd_ctl05_dwnmarks" href="javascript:__doPostBack('marksdwd$ctl05$dwnmarks','')">HS-30101(EE)-CS_END_NOV_2025</a>
+                                                    </td>
+	</tr><tr style="color:#003399;background-color:White;">
+		<td>
+                                                        <a id="marksdwd_ctl06_dwnmarks" href="javascript:__doPostBack('marksdwd$ctl06$dwnmarks','')">CS-30009(DOS)-CS_END_NOV_2025</a>
+                                                    </td>
+	</tr><tr style="color:#003399;background-color:White;">
+		<td>
+                                                        <a id="marksdwd_ctl07_dwnmarks" href="javascript:__doPostBack('marksdwd$ctl07$dwnmarks','')">CS-30013(DMDW)-CS_END_NOV_2025</a>
+                                                    </td>
+	</tr>
+</table>
+                                        <br />
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                        <td width="50%" align="center" valign="middle">
+                            <table id="Table1" cellpadding="4" cellspacing="1" bgcolor="#c0c0c0" width="40%" align="center">
+	<tr bgcolor="white" height="40">
+		<td class="bld" width="40%">
+                                        Semester
+                                    </td>
+		<td class="tdtext" width="60%">
+                                        <select name="ddlsemester" onchange="javascript:setTimeout('__doPostBack(\'ddlsemester\',\'\')', 0)" id="ddlsemester">
+			<option value="0">--Select--</option>
+			<option selected="selected" value="5">5th</option>
+
+		</select>
+                                    </td>
+	</tr>
+	<tr bgcolor="white" height="40">
+		<td class="bld">
+                                        Course No
+                                    </td>
+		<td class="tdtext">
+                                        <select name="ddlCourse" onchange="javascript:setTimeout('__doPostBack(\'ddlCourse\',\'\')', 0)" id="ddlCourse">
+			<option selected="selected" value="--Select--">--Select--</option>
+			<option value="251104013">CS-30003(CN)-CS_END_NOV_2025</option>
+			<option value="251104014">CS-30001(DAA)-CS_END_NOV_2025</option>
+			<option value="251104015">CS-31001(SE)-CS_END_NOV_2025</option>
+			<option value="251104016">HS-30101(EE)-CS_END_NOV_2025</option>
+			<option value="251104019">CS-30009(DOS)-CS_END_NOV_2025</option>
+			<option value="251104024">CS-30013(DMDW)-CS_END_NOV_2025</option>
+
+		</select>
+                                    </td>
+	</tr>
+</table>
+
+                            <p>
+                                &nbsp;</p>
+                            <span id="DWNLBL"></span>
+                            <input type="submit" name="btnLogin" value="Continue" id="btnLogin" class="submit" /><br />
+                            <br />
+                            <span id="ltlDisp" class="bld" style="color:Red;"></span>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+        <tr>
+            <td height="22">
+                
+<table cellspacing="0" cellpadding="0" width="100%" border="0" style="background-color:#d4cab6">
+    <tr  style="height:2px; background-color:#c2d6d7">
+        <td colspan="3" align="right">
+        </td>
+    </tr>
+    <tr style="height:20px; background-color:#003300">
+        <td colspan="3" align="center" class="stext">
+           <font size="1" face="verdana" color="#ffffff"><b> © Powered by Eduquity Career Technologies (Pvt) Ltd.,</b></font>
+        </td>
+    </tr>
+</table>
+            </td>
+        </tr>
+    </table>
+    </form>
+</body>
+</html>
