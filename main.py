@@ -3,7 +3,7 @@ import os
 import time
 import gc
 import uuid
-from supporting_functions import create_rag_chain, create_vector_store, add_to_vector_store
+from supporting_functions import create_rag_chain, analyze_image_with_vision_llm, create_vector_store, add_to_vector_store
 
 
 st.set_page_config(page_title="RAG with Ollama & FAISS", layout="wide")
@@ -25,10 +25,14 @@ if "persona" not in st.session_state:
     st.session_state.persona = "EDUCATION"
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()  # ✅ Track all processed files
+if "processed_images" not in st.session_state:
+    st.session_state.processed_images = set()  # Track all the images
 if "last_question" not in st.session_state:
     st.session_state.last_question = None
 if "pdf_processed" not in st.session_state:
     st.session_state.pdf_processed = False
+if "analyze_image_with_vision_llm" not in st.session_state:
+    st.session_state.analyze_image_with_vision_llm = None
 if "answer_generated" not in st.session_state:
     st.session_state.answer_generated = False  # ✅ Track if answer was shown
 if "persona_changed" not in st.session_state:
@@ -39,9 +43,11 @@ if "persona_changed" not in st.session_state:
 # ---- Function to safely cleanup FAISS files ----
 def cleanup_faiss_files():
     st.session_state.vector_store = None
+    st.session_state.analyze_image_with_vision_llm = None
     st.session_state.rag_chain = None
     st.session_state.pdf_processed = False
     st.session_state.processed_files = set()  # ✅ Clear file tracking
+    st.session_state.processed_images = set()  # Clear images tracking
     st.session_state.last_question = None
     st.session_state.answer_generated = False
     gc.collect()
@@ -66,6 +72,12 @@ with st.sidebar:
         "Upload PDF(s)", 
         type=["pdf"],
         accept_multiple_files=True  # ✅ KEY CHANGE
+    )
+
+    upload_images = st.file_uploader(
+        "Upload Images",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True
     )
 
 
@@ -106,12 +118,15 @@ with st.sidebar:
 
 
 # ---- Document Processing (Multiple PDFs) ----
-if process_btn and uploaded_files:
+if process_btn and (uploaded_files or upload_images):
     
     # ✅ Identify new files to process
     uploaded_file_names = {f.name for f in uploaded_files}
+    uploaded_image_names = {f.name for f in upload_images}
     new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
-    removed_files = st.session_state.processed_files - uploaded_file_names
+    new_images = [f for f in upload_images if f.name not in st.session_state.processed_images]
+
+    removed_files = st.session_state.processed_files - uploaded_file_names - uploaded_image_names
 
 
     # ✅ Handle removed files - rebuild from scratch if any removed
@@ -119,12 +134,14 @@ if process_btn and uploaded_files:
         st.warning(f"Detected {len(removed_files)} removed file(s). Rebuilding vector store...")
         cleanup_faiss_files()
         new_files = uploaded_files  # Process all files
+        new_images = upload_images
 
 
-    if new_files:
+    if new_files or new_images:
         start_time = time.time()
         
         os.makedirs("temp_docs", exist_ok=True)
+        os.makedirs("temp_images", exist_ok=True)
 
 
         # ✅ Process each new file
@@ -148,6 +165,33 @@ if process_btn and uploaded_files:
                     )
                 
                 st.session_state.processed_files.add(uploaded_file.name)
+        
+        for idx, upload_images in enumerate(new_images):
+            with st.spinner(f"🚀 Processing {upload_images.name} ({idx+1}/{len(new_images)})..."):
+
+                img_file_path = os.path.join("temp_images", upload_images.name)
+
+                with open (img_file_path, "wb") as f:
+                    f.write(upload_images.getbuffer())
+
+                image_findings = analyze_image_with_vision_llm(img_file_path)
+
+                findings_txt_path = os.path.join(
+                    "temp_docs", f"{upload_images.name}_findings.txt"
+                )
+
+                with open(findings_txt_path, "w", encoding="utf-8") as f:
+                    f.write(image_findings)
+
+                if st.session_state.vector_store is None:
+                    st.session_state.vector_store = create_vector_store(findings_txt_path)
+                else:
+                    st.session_state.vector_store = add_to_vector_store(
+                        st.session_state.vector_store,
+                        findings_txt_path
+                    )
+                
+                st.session_state.processed_images.add(upload_images.name)
 
 
         # ✅ Create/update RAG chain with combined vector store
@@ -158,9 +202,11 @@ if process_btn and uploaded_files:
         st.session_state.pdf_processed = True
 
 
-        st.success(f"✔ {len(new_files)} PDF(s) processed in **{time.time() - start_time:.2f} seconds**")
+        st.success(
+                f"✔ {len(new_files)} PDF(s) and {len(new_images)} image(s) processed "
+                f"in **{time.time() - start_time:.2f} seconds**"
+            )
         st.success(f"📚 Total documents loaded: {len(st.session_state.processed_files)}")
-
 
     else:
         st.info("📄 All uploaded PDFs already processed. Ready for questions.")

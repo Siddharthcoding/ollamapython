@@ -3,6 +3,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.llms import Ollama
+import ollama
 from langchain_core.prompts import ChatPromptTemplate
 import os
 import pickle
@@ -242,3 +243,42 @@ Your answers must be:
 """
 
     return ""
+
+
+
+
+
+
+
+def analyze_image_with_vision_llm(image_path):
+    prompt = """
+    You are a medical image analysis assistant.
+
+    Analyze the given image carefully.
+
+    Instructions:
+    - Extract only visible findings from the image.
+    - Do NOT diagnose.
+    - Do NOT assume patient history.
+    - Mention uncertainty if present.
+
+    Output format:
+    - Image type:
+    - Key visible findings (bullet points):
+    - Possible clinical relevance (non-diagnostic):
+    - Confidence level (low / medium / high)
+    """
+
+
+    resp = ollama.chat(
+        model="llava:7b",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [image_path]
+            }
+        ]
+    )
+
+    return resp["message"]["content"]
