@@ -12,6 +12,7 @@ from langchain.chains import create_retrieval_chain
 import fitz  
 import uuid
 from langchain_core.documents import Document
+from PIL import Image
 
 llm_model = "llama3.2:1b"
 llm_model1 = "deepseek-r1:8b"
@@ -284,6 +285,12 @@ Your answers must be:
 
     return ""
 
+def image_resize(image_path, max_size=1024):
+    img = Image.open(image_path)
+    img.thumbnail((max_size, max_size))
+    img.save(image_path)
+
+
 def analyze_image_with_vision_llm(image_path):
 
     prompt = """
@@ -302,6 +309,9 @@ Output format:
 - Possible Clinical Relevance:
 - Confidence Level:
 """
+
+    image_resize(image_path)
+
     with open(image_path, "rb") as f:
         image_bytes = f.read()
 
@@ -332,6 +342,9 @@ def extract_images_from_pdf(file_path, output_folder="temp_images"):
             base_image = doc.extract_image(xref)
             image_bytes = base_image['image']
             image_ext = base_image['ext']
+
+            if base_image["width"] < 300 or base_image["height"] < 300:
+                continue
 
             image_filename = f"{output_folder}/{uuid.uuid4()}.{image_ext}"
 
