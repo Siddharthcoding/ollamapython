@@ -9,6 +9,9 @@ import os
 import pickle
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
+import fitz  
+import uuid
+from langchain_core.documents import Document
 
 llm_model = "llama3.2:1b"
 llm_model1 = "deepseek-r1:8b"
@@ -38,8 +41,27 @@ def create_vector_store(file_path):
     loader = PyMuPDFLoader(file_path)
     docs = loader.load()
 
+    if not docs:
+        raise ValueError("No text extracted from PDF.")
+
     for doc in docs:
         doc.metadata['source'] = os.path.basename(file_path)
+
+    image_paths = extract_images_from_pdf(file_path)
+
+    for image_path in image_paths:
+        try:
+            vision_text = analyze_image_with_vision_llm(image_path)
+
+            image_doc = Document(
+                page_content=f"Image Analysis:\n{vision_text}",
+                metadata={"source": os.path.basename(file_path), "type": "image"}
+            )
+
+            docs.append(image_doc)
+        
+        except Exception as e:
+            print(f"Image analysis failed: {e}")
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500,
@@ -66,8 +88,28 @@ def add_to_vector_store(existing_store, file_path):
     loader = PyMuPDFLoader(file_path)
     docs = loader.load()
 
+    if not docs:
+        raise ValueError("No text extracted from PDF.")
+
     for doc in docs:
         doc.metadata['source'] = os.path.basename(file_path)
+
+    
+    image_paths = extract_images_from_pdf(file_path)
+
+    for image_path in image_paths:
+        try:
+            vision_text = analyze_image_with_vision_llm(image_path)
+
+            image_doc = Document(
+                page_content=f"Image Analysis:\n{vision_text}",
+                metadata={"source": os.path.basename(file_path), "type": "image"}
+            )
+
+            docs.append(image_doc)
+        
+        except Exception as e:
+            print(f"Image analysis failed: {e}")
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500,
@@ -260,14 +302,41 @@ Output format:
 - Possible Clinical Relevance:
 - Confidence Level:
 """
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
 
     resp = ollama.chat(
         model="llava:7b",
         messages=[{
             "role": "user",
             "content": prompt,
-            "images": [image_path]
+            "images": [image_bytes]
         }]
     )
 
     return resp["message"]["content"]
+
+
+def extract_images_from_pdf(file_path, output_folder="temp_images"):
+    os.makedirs(output_folder,exist_ok = True)
+
+    doc = fitz.open(file_path)
+    image_path = []
+
+    for page_ind in range(len(doc)):
+        page = doc[page_ind]
+        image_list = page.get_images(full=True)
+
+        for img_ind, img in enumerate(image_list):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image['image']
+            image_ext = base_image['ext']
+
+            image_filename = f"{output_folder}/{uuid.uuid4()}.{image_ext}"
+
+            with open(image_filename, "wb") as f:
+                f.write(image_bytes)
+
+            image_path.append(image_filename)
+    return image_path
