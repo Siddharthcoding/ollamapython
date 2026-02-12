@@ -10,154 +10,125 @@ import pickle
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
 
-
 llm_model = "llama3.2:1b"
 llm_model1 = "deepseek-r1:8b"
 embedding_model = "mxbai-embed-large"
-PERSIST_DIR = "db"
 FAISS_INDEX_PATH = "faiss.index"
 FAISS_STORE_PATH = "faiss_store.pkl"
 
 
+# --------------------------------------------------
+# Try loading existing FAISS store
+# --------------------------------------------------
+def try_load_faiss_store():
+    if os.path.exists(FAISS_INDEX_PATH):
+        try:
+            embeddings = OllamaEmbeddings(model=embedding_model)
+            return FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+        except Exception:
+            return None
+    return None
+
 
 # --------------------------------------------------
-# Vector Store Creation (First PDF)
+# Vector Store Creation
 # --------------------------------------------------
 def create_vector_store(file_path):
-    """Create initial FAISS vector store from first PDF"""
-    
-    print(f"⚡ Creating new FAISS vector store from {file_path}...")
-
 
     loader = PyMuPDFLoader(file_path)
     docs = loader.load()
 
-
-    # ✅ Add source metadata to track which PDF chunks came from
     for doc in docs:
         doc.metadata['source'] = os.path.basename(file_path)
 
-
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500,
-        chunk_overlap=100
+        chunk_overlap=150
     )
     chunks = text_splitter.split_documents(docs)
 
-
     embeddings = OllamaEmbeddings(model=embedding_model)
-
-
     faiss_store = FAISS.from_documents(chunks, embeddings)
 
-
-    # ✅ Save to disk
     faiss_store.save_local(FAISS_INDEX_PATH)
+
     with open(FAISS_STORE_PATH, "wb") as f:
-        pickle.dump({"embedding": embeddings}, f)
+        pickle.dump({"embedding": embedding_model}, f)
 
-
-    print(f"✔ FAISS index created with {len(chunks)} chunks")
     return faiss_store
 
 
-
 # --------------------------------------------------
-# Add Documents to Existing Vector Store
+# Add to Existing Vector Store
 # --------------------------------------------------
 def add_to_vector_store(existing_store, file_path):
-    """Add new PDF to existing FAISS vector store"""
-    
-    print(f"📄 Adding {file_path} to existing vector store...")
-
 
     loader = PyMuPDFLoader(file_path)
     docs = loader.load()
 
-
-    # ✅ Add source metadata
     for doc in docs:
         doc.metadata['source'] = os.path.basename(file_path)
 
-
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500,
-        chunk_overlap=100
+        chunk_overlap=150
     )
     chunks = text_splitter.split_documents(docs)
 
-
-    # ✅ Get embeddings (must use same model as original)
     embeddings = OllamaEmbeddings(model=embedding_model)
-
-
-    # ✅ Create temporary store for new PDF
     new_store = FAISS.from_documents(chunks, embeddings)
 
-
-    # ✅ Merge into existing store
     existing_store.merge_from(new_store)
-
-
-    # ✅ Save updated store
     existing_store.save_local(FAISS_INDEX_PATH)
-    with open(FAISS_STORE_PATH, "wb") as f:
-        pickle.dump({"embedding": embeddings}, f)
 
-
-    print(f"✔ Added {len(chunks)} chunks. Vector store updated.")
     return existing_store
 
 
-
 # --------------------------------------------------
-# RAG Chain
+# RAG Chain (Persona-aware)
 # --------------------------------------------------
 def create_rag_chain(vector_store, persona):
 
-
     if persona == "BUSINESS":
         llm = Ollama(model="qwen2.5:7b", temperature=0.4)
+
     elif persona == "RESEARCH":
         llm = Ollama(model="deepseek-r1:1.5b", temperature=0.2)
+
+    elif persona == "MEDICAL":
+        llm = Ollama(model="deepseek-r1:1.5b", temperature=0.1)
+
     else:
         llm = Ollama(model="llama3.2:1b", temperature=0.5)
 
-
     prompt = ChatPromptTemplate.from_messages([
-        ("system", set_persona(persona)),
-        ("human", """
-You are an expert assistant. Answer the user's question using ONLY the information provided in the context below. 
-If the answer cannot be found in the context, respond exactly with:
-"The document does not contain this information."
+    ("system", set_persona(persona)),
+    ("human", """
+You must answer STRICTLY using only the provided context below.
 
+If the context does NOT contain sufficient information,
+respond exactly with:
+"The document does not contain sufficient medical information."
+
+Do NOT:
+- Invent diseases
+- Invent lab values
+- Assume symptoms
+- Provide prescriptions
 
 Context:
 {context}
 
-
-Question:
+User Question:
 {input}
 
-
-Answer format instructions:
-- Provide a clear and concise answer.
-- Use complete sentences.
-- Do NOT include any information not in the context.
-- If the answer is not present, respond exactly as instructed above.
-- When information comes from multiple documents, synthesize it coherently.
-
-
-Answer:
+Structured Answer:
 """)
-    ])
+])
 
-
-    # ✅ Retrieve from multiple documents
-    retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+    retriever = vector_store.as_retriever(search_kwargs={"k": 6})
     document_chain = create_stuff_documents_chain(llm, prompt)
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
-
 
     return retrieval_chain
 
@@ -167,9 +138,36 @@ Answer:
 # Persona Prompts
 # --------------------------------------------------
 def set_persona(choice):
+    if choice == "MEDICAL":
+        return """
+You are a clinical medical reasoning assistant.
 
+STRICT MEDICAL RULES:
+- Use ONLY information present in the provided context.
+- Do NOT make definitive diagnoses.
+- Use probability-based language (may indicate, could suggest).
+- Do NOT prescribe medications.
+- If insufficient data, respond exactly:
+  "The document does not contain sufficient medical information."
+- Always recommend consulting a licensed physician.
 
-    if choice == "RESEARCH":
+You must respond in this structured format:
+
+Patient Summary:
+Observed Symptoms:
+Abnormal Findings:
+Possible Conditions (ranked by likelihood):
+Recommended Tests:
+Suggested Care Plan:
+Urgency Level (Low / Moderate / High / Emergency):
+Confidence Level:
+
+If the question is about symptoms, analyze patterns.
+If about lab values, interpret high/low relative to context.
+If about scans, reason from extracted findings.
+"""
+
+    elif choice == "RESEARCH":
         return """You are a research expert.
 Your answers must be:
 - highly technical
@@ -244,41 +242,32 @@ Your answers must be:
 
     return ""
 
-
-
-
-
-
-
 def analyze_image_with_vision_llm(image_path):
+
     prompt = """
-    You are a medical image analysis assistant.
+You are a radiology interpretation assistant.
 
-    Analyze the given image carefully.
+STRICT:
+- Extract only visible findings.
+- Do NOT diagnose.
+- No treatment advice.
+- Mention uncertainty if applicable.
 
-    Instructions:
-    - Extract only visible findings from the image.
-    - Do NOT diagnose.
-    - Do NOT assume patient history.
-    - Mention uncertainty if present.
-
-    Output format:
-    - Image type:
-    - Key visible findings (bullet points):
-    - Possible clinical relevance (non-diagnostic):
-    - Confidence level (low / medium / high)
-    """
-
+Output format:
+- Image Type:
+- Observed Abnormalities:
+- Measurements (if visible):
+- Possible Clinical Relevance:
+- Confidence Level:
+"""
 
     resp = ollama.chat(
         model="llava:7b",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-                "images": [image_path]
-            }
-        ]
+        messages=[{
+            "role": "user",
+            "content": prompt,
+            "images": [image_path]
+        }]
     )
 
     return resp["message"]["content"]

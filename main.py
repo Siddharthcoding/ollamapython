@@ -1,57 +1,67 @@
+# main.py
 import streamlit as st
 import os
 import time
 import gc
 import uuid
-from supporting_functions import create_rag_chain, analyze_image_with_vision_llm, create_vector_store, add_to_vector_store
+from typing import List, Set
+
+from supporting_functions import (
+    create_rag_chain,
+    analyze_image_with_vision_llm,
+    create_vector_store,
+    add_to_vector_store,
+    try_load_faiss_store
+)
 
 
-st.set_page_config(page_title="RAG with Ollama & FAISS", layout="wide")
-st.title("📄 RAG Project with Ollama & FAISS")
+st.set_page_config(page_title="RAG with Ollama & FAISS (Medical-ready)", layout="wide")
+st.title("📄 RAG Project with Ollama & FAISS (Medical-ready)")
 
+st.write(
+    """
+Upload multiple PDFs (medical reports, scanned lab results) and images (scans) and ask
+questions about their combined content. This app avoids re-processing already added files
+and supports incremental indexing.
+"""
+)
 
-st.write("""
-Upload multiple PDFs and ask questions about their combined content.
-This optimized version loads PDFs faster and avoids re-processing.
-""")
-
-
-# ---- Session state initialization ----
+# -------------------------
+# Session state initialization
+# -------------------------
 if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
+    # try to load existing store from disk if present
+    st.session_state.vector_store = try_load_faiss_store()
 if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
 if "persona" not in st.session_state:
-    st.session_state.persona = "EDUCATION"
+    st.session_state.persona = "MEDICAL"  # default to medical persona
 if "processed_files" not in st.session_state:
-    st.session_state.processed_files = set()  # ✅ Track all processed files
+    st.session_state.processed_files = set()  # type: Set[str]
 if "processed_images" not in st.session_state:
-    st.session_state.processed_images = set()  # Track all the images
+    st.session_state.processed_images = set()  # type: Set[str]
 if "last_question" not in st.session_state:
     st.session_state.last_question = None
 if "pdf_processed" not in st.session_state:
     st.session_state.pdf_processed = False
-if "analyze_image_with_vision_llm" not in st.session_state:
-    st.session_state.analyze_image_with_vision_llm = None
 if "answer_generated" not in st.session_state:
-    st.session_state.answer_generated = False  # ✅ Track if answer was shown
+    st.session_state.answer_generated = False
 if "persona_changed" not in st.session_state:
-    st.session_state.persona_changed = False  # ✅ Track persona changes
+    st.session_state.persona_changed = False
 
 
-
-# ---- Function to safely cleanup FAISS files ----
+# -------------------------
+# Function to safely cleanup FAISS files
+# -------------------------
 def cleanup_faiss_files():
     st.session_state.vector_store = None
-    st.session_state.analyze_image_with_vision_llm = None
     st.session_state.rag_chain = None
     st.session_state.pdf_processed = False
-    st.session_state.processed_files = set()  # ✅ Clear file tracking
-    st.session_state.processed_images = set()  # Clear images tracking
+    st.session_state.processed_files = set()
+    st.session_state.processed_images = set()
     st.session_state.last_question = None
     st.session_state.answer_generated = False
     gc.collect()
-
 
     for f in ["faiss.index", "faiss_store.pkl"]:
         if os.path.exists(f):
@@ -59,222 +69,209 @@ def cleanup_faiss_files():
                 os.remove(f)
             except PermissionError:
                 os.rename(f, f"old_{uuid.uuid4()}_{f}")
+            except Exception:
+                # best-effort delete
+                pass
 
 
-
-# ---- Sidebar ----
+# -------------------------
+# Sidebar
+# -------------------------
 with st.sidebar:
     st.header("Upload Your Documents")
 
-
-    # ✅ Enable multiple file upload
+    # multiple file uploader may be None if user didn't upload anything
     uploaded_files = st.file_uploader(
-        "Upload PDF(s)", 
+        "Upload PDF(s)",
         type=["pdf"],
-        accept_multiple_files=True  # ✅ KEY CHANGE
+        accept_multiple_files=True
     )
 
     upload_images = st.file_uploader(
-        "Upload Images",
+        "Upload Images (scans/photos)",
         type=["png", "jpg", "jpeg"],
         accept_multiple_files=True
     )
 
-
     persona_choice = st.selectbox(
         "Select your persona",
-        ("RESEARCH", "BUSINESS", "EDUCATION"),
-        index=("RESEARCH", "BUSINESS", "EDUCATION").index(st.session_state.persona)
+        ("MEDICAL", "RESEARCH", "BUSINESS", "EDUCATION"),
+        index=("MEDICAL", "RESEARCH", "BUSINESS", "EDUCATION").index(st.session_state.persona
+                                                                       if st.session_state.persona in ("MEDICAL", "RESEARCH", "BUSINESS", "EDUCATION")
+                                                                       else 0)
     )
 
-
-    # ✅ Persona switch = rebuild ONLY RAG chain + trigger regeneration
+    # If persona changed, mark and rebuild chain (not vector store)
     if persona_choice != st.session_state.persona:
         st.session_state.persona = persona_choice
-        st.session_state.persona_changed = True  # ✅ Mark that persona changed
+        st.session_state.persona_changed = True
         if st.session_state.vector_store:
             st.session_state.rag_chain = create_rag_chain(
                 st.session_state.vector_store,
                 st.session_state.persona
             )
 
-
-    # ✅ Show processed files count
-    if st.session_state.processed_files:
-        st.info(f"📚 {len(st.session_state.processed_files)} file(s) currently loaded")
-        with st.expander("View loaded files"):
-            for fname in st.session_state.processed_files:
-                st.write(f"✓ {fname}")
-
+    # Status of currently loaded files
+    if st.session_state.processed_files or st.session_state.processed_images:
+        st.info(f"📚 {len(st.session_state.processed_files) + len(st.session_state.processed_images)} file(s) currently loaded")
+        with st.expander("View loaded files/images"):
+            for fname in sorted(st.session_state.processed_files):
+                st.write(f"📄 {fname}")
+            for iname in sorted(st.session_state.processed_images):
+                st.write(f"🖼️ {iname}")
 
     process_btn = st.button("Process Documents")
-    
-    # ✅ Clear all button
+
     if st.button("Clear All Documents"):
         cleanup_faiss_files()
         st.success("All documents cleared!")
         st.rerun()
 
 
+# -------------------------
+# Document Processing (Multiple PDFs + Images)
+# -------------------------
+# Convert None -> empty list for easier set ops
+uploaded_files = uploaded_files or []
+upload_images = upload_images or []
 
-# ---- Document Processing (Multiple PDFs) ----
-if process_btn and (uploaded_files or upload_images):
-    
-    # ✅ Identify new files to process
-    uploaded_file_names = {f.name for f in uploaded_files}
-    uploaded_image_names = {f.name for f in upload_images}
-    new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
-    new_images = [f for f in upload_images if f.name not in st.session_state.processed_images]
-
-    removed_files = st.session_state.processed_files - uploaded_file_names - uploaded_image_names
-
-
-    # ✅ Handle removed files - rebuild from scratch if any removed
-    if removed_files:
-        st.warning(f"Detected {len(removed_files)} removed file(s). Rebuilding vector store...")
-        cleanup_faiss_files()
-        new_files = uploaded_files  # Process all files
-        new_images = upload_images
-
-
-    if new_files or new_images:
-        start_time = time.time()
-        
-        os.makedirs("temp_docs", exist_ok=True)
-        os.makedirs("temp_images", exist_ok=True)
-
-
-        # ✅ Process each new file
-        for idx, uploaded_file in enumerate(new_files):
-            with st.spinner(f"🚀 Processing {uploaded_file.name} ({idx+1}/{len(new_files)})..."):
-                
-                file_path = os.path.join("temp_docs", uploaded_file.name)
-                
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-
-
-                # ✅ First file: create vector store
-                if st.session_state.vector_store is None:
-                    st.session_state.vector_store = create_vector_store(file_path)
-                else:
-                    # ✅ Subsequent files: merge into existing store
-                    st.session_state.vector_store = add_to_vector_store(
-                        st.session_state.vector_store,
-                        file_path
-                    )
-                
-                st.session_state.processed_files.add(uploaded_file.name)
-        
-        for idx, upload_images in enumerate(new_images):
-            with st.spinner(f"🚀 Processing {upload_images.name} ({idx+1}/{len(new_images)})..."):
-
-                img_file_path = os.path.join("temp_images", upload_images.name)
-
-                with open (img_file_path, "wb") as f:
-                    f.write(upload_images.getbuffer())
-
-                image_findings = analyze_image_with_vision_llm(img_file_path)
-
-                findings_txt_path = os.path.join(
-                    "temp_docs", f"{upload_images.name}_findings.txt"
-                )
-
-                with open(findings_txt_path, "w", encoding="utf-8") as f:
-                    f.write(image_findings)
-
-                if st.session_state.vector_store is None:
-                    st.session_state.vector_store = create_vector_store(findings_txt_path)
-                else:
-                    st.session_state.vector_store = add_to_vector_store(
-                        st.session_state.vector_store,
-                        findings_txt_path
-                    )
-                
-                st.session_state.processed_images.add(upload_images.name)
-
-
-        # ✅ Create/update RAG chain with combined vector store
-        st.session_state.rag_chain = create_rag_chain(
-            st.session_state.vector_store,
-            st.session_state.persona
-        )
-        st.session_state.pdf_processed = True
-
-
-        st.success(
-                f"✔ {len(new_files)} PDF(s) and {len(new_images)} image(s) processed "
-                f"in **{time.time() - start_time:.2f} seconds**"
-            )
-        st.success(f"📚 Total documents loaded: {len(st.session_state.processed_files)}")
-
+if process_btn:
+    if not uploaded_files and not upload_images:
+        st.warning("Please upload at least one PDF or image to process.")
     else:
-        st.info("📄 All uploaded PDFs already processed. Ready for questions.")
+        uploaded_file_names = {f.name for f in uploaded_files}
+        uploaded_image_names = {f.name for f in upload_images}
+
+        # new inputs (not processed earlier)
+        new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
+        new_images = [f for f in upload_images if f.name not in st.session_state.processed_images]
+
+        # detect removed files (user removed some from UI) -> rebuild required
+        removed_files = (st.session_state.processed_files | st.session_state.processed_images) - (uploaded_file_names | uploaded_image_names)
+        if removed_files:
+            st.warning(f"Detected {len(removed_files)} removed file(s). Rebuilding vector store from current uploads.")
+            cleanup_faiss_files()
+            # Re-process everything currently present in the uploader
+            new_files = list(uploaded_files)
+            new_images = list(upload_images)
+
+        if not new_files and not new_images and st.session_state.vector_store is not None:
+            st.info("No new files to add — vector store already contains uploaded documents.")
+        else:
+            start_time = time.time()
+            os.makedirs("temp_docs", exist_ok=True)
+            os.makedirs("temp_images", exist_ok=True)
+
+            # create or extend vector store
+            try:
+                # process PDFs
+                for idx, uploaded_file in enumerate(new_files):
+                    with st.spinner(f"Processing PDF {uploaded_file.name} ({idx+1}/{len(new_files)})..."):
+                        file_path = os.path.join("temp_docs", uploaded_file.name)
+                        with open(file_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+
+                        if st.session_state.vector_store is None:
+                            st.session_state.vector_store = create_vector_store(file_path)
+                        else:
+                            st.session_state.vector_store = add_to_vector_store(
+                                st.session_state.vector_store, file_path
+                            )
+
+                        st.session_state.processed_files.add(uploaded_file.name)
+
+                # process images
+                for idx, img in enumerate(new_images):
+                    with st.spinner(f"Processing Image {img.name} ({idx+1}/{len(new_images)})..."):
+                        img_file_path = os.path.join("temp_images", img.name)
+                        with open(img_file_path, "wb") as f:
+                            f.write(img.getbuffer())
+
+                        # run vision LLM to extract findings, stored as a small text doc
+                        image_findings = analyze_image_with_vision_llm(img_file_path)
+                        findings_txt_path = os.path.join("temp_docs", f"{img.name}_findings.txt")
+                        with open(findings_txt_path, "w", encoding="utf-8") as f:
+                            f.write(image_findings)
+
+                        if st.session_state.vector_store is None:
+                            st.session_state.vector_store = create_vector_store(findings_txt_path)
+                        else:
+                            st.session_state.vector_store = add_to_vector_store(
+                                st.session_state.vector_store, findings_txt_path
+                            )
+
+                        st.session_state.processed_images.add(img.name)
+
+                # create/update rag chain
+                if st.session_state.vector_store:
+                    st.session_state.rag_chain = create_rag_chain(
+                        st.session_state.vector_store, st.session_state.persona
+                    )
+
+                st.session_state.pdf_processed = True
+                elapsed = time.time() - start_time
+                st.success(f"✔ {len(new_files)} PDF(s) and {len(new_images)} image(s) processed in {elapsed:.2f} s")
+                st.success(f"📚 Total documents loaded: {len(st.session_state.processed_files)} PDFs, {len(st.session_state.processed_images)} images")
+
+            except Exception as e:
+                st.error(f"Error while processing documents: {e}")
 
 
-elif process_btn and not uploaded_files:
-    st.warning("Please upload at least one PDF file.")
-
-
-
-# ---- Q&A Section ----
+# -------------------------
+# Q&A Section
+# -------------------------
 if st.session_state.rag_chain:
-
     st.header("Ask a Question")
-    st.caption(f"Querying across {len(st.session_state.processed_files)} document(s)")
+    st.caption(f"Querying across {len(st.session_state.processed_files) + len(st.session_state.processed_images)} document(s)")
+
     user_q = st.text_input("Your question:")
 
     if st.button("Get Answer"):
-        if not user_q.strip():
+        if not user_q or not user_q.strip():
             st.warning("Please enter a question.")
         else:
-            st.session_state.last_question = user_q
+            st.session_state.last_question = user_q.strip()
             st.session_state.answer_generated = True
-            st.session_state.persona_changed = False 
+            st.session_state.persona_changed = False
 
-
-    # ---- Auto-Generate Answer on Persona Change ----
-    if st.session_state.persona_changed and st.session_state.last_question and st.session_state.answer_generated:
-        st.session_state.persona_changed = False  
-
-
-    # ---- Generate / Regenerate Answer ----
+    # If last_question and answer_generated, invoke chain
     if st.session_state.last_question and st.session_state.answer_generated:
-
-
         st.subheader(f"Answer ({st.session_state.persona})")
-        answer_placeholder = st.empty()
-        streamed_text = ""
-        final_response = None
-
-        with st.spinner("🤖 Thinking..."):
+        with st.spinner("Thinking..."):
             try:
-                for chunk in st.session_state.rag_chain.stream(
-                    {"input": st.session_state.last_question}
-                ):
-                    if "answer" in chunk:
-                        streamed_text += chunk["answer"]
-                        answer_placeholder.markdown(streamed_text)
+                # retrieval chain uses .invoke / .run (non-streaming)
+                response = st.session_state.rag_chain.invoke({"input": st.session_state.last_question})
+                # Some chain types return dict, some return string. Normalize:
+                if isinstance(response, dict):
+                    answer_text = response.get("answer") or response.get("output_text") or str(response)
+                    context = response.get("context") or response.get("source_documents") or []
+                else:
+                    answer_text = str(response)
+                    context = []
 
+                st.markdown(answer_text)
 
-                    if "context" in chunk:
-                        final_response = chunk
+                if context:
+                    with st.expander("Retrieved Context (top documents)"):
+                        for i, doc in enumerate(context[:6], 1):
 
+                            if hasattr(doc, "page_content"):
+                                page_content = doc.page_content
+                                metadata = doc.metadata
+                            elif isinstance(doc, dict):
+                                page_content = doc.get("page_content", str(doc))
+                                metadata = doc.get("metadata", {})
+                            else:
+                                page_content = str(doc)
+                                metadata = {}
 
-                if final_response and "context" in final_response:
-                    context_chunks = final_response["context"]
-                    num_chunks = min(5, len(context_chunks))
-                    with st.expander(f"Retrieved Context (Top {num_chunks} Chunks)"):
-                        for i, doc in enumerate(context_chunks[:num_chunks], 1):
-                            st.markdown(f"**Chunk {i}:**")
-                            # ✅ Show source document if available
-                            source = doc.metadata.get('source', 'Unknown')
-                            st.caption(f"Source: {source}")
-                            st.info(doc.page_content)
+                            source = metadata.get("source", "Unknown")
+
+                            st.markdown(f"**Doc {i} — Source:** {source}")
+                            st.info(page_content)
+
 
             except Exception as e:
-                st.error(f"Error: {e}")
-
-
+                st.error(f"Failed to produce answer: {e}")
 else:
-    st.info("Upload and process PDF(s) to begin.")
+    st.info("Upload and process PDF(s) or images to begin.")
