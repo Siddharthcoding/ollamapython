@@ -2,8 +2,10 @@ from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OllamaEmbeddings
+from concurrent.futures import ThreadPoolExecutor
 from langchain_community.llms import Ollama
 import ollama
+from functools import partial
 from langchain_core.prompts import ChatPromptTemplate
 import os
 import pickle
@@ -34,6 +36,23 @@ def try_load_faiss_store():
     return None
 
 
+embeddings = OllamaEmbeddings(model=embedding_model)
+
+def process_image(image_path,file_path):
+    try:
+            vision_text = analyze_image_with_vision_llm(image_path)
+            return Document(
+                page_content=f"Image Analysis:\n{vision_text}",
+                metadata={
+                    "source": os.path.basename(file_path),
+                    "type": "image"
+                }
+            )
+    except Exception as e:
+            print(f"Image extraction failed: {e}")
+            return None
+
+
 # --------------------------------------------------
 # Vector Store Creation
 # --------------------------------------------------
@@ -50,27 +69,19 @@ def create_vector_store(file_path):
 
     image_paths = extract_images_from_pdf(file_path)
 
-    for image_path in image_paths:
-        try:
-            vision_text = analyze_image_with_vision_llm(image_path)
+    process_func = partial(process_image, file_path=file_path)
+    
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        image_docs = list(executor.map(process_func, image_paths))
 
-            image_doc = Document(
-                page_content=f"Image Analysis:\n{vision_text}",
-                metadata={"source": os.path.basename(file_path), "type": "image"}
-            )
-
-            docs.append(image_doc)
-        
-        except Exception as e:
-            print(f"Image analysis failed: {e}")
+    docs.extend([doc for doc in image_docs if doc])
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=150
+        chunk_size=800,
+        chunk_overlap=100
     )
     chunks = text_splitter.split_documents(docs)
 
-    embeddings = OllamaEmbeddings(model=embedding_model)
     faiss_store = FAISS.from_documents(chunks, embeddings)
 
     faiss_store.save_local(FAISS_INDEX_PATH)
@@ -98,31 +109,22 @@ def add_to_vector_store(existing_store, file_path):
     
     image_paths = extract_images_from_pdf(file_path)
 
-    for image_path in image_paths:
-        try:
-            vision_text = analyze_image_with_vision_llm(image_path)
-
-            image_doc = Document(
-                page_content=f"Image Analysis:\n{vision_text}",
-                metadata={"source": os.path.basename(file_path), "type": "image"}
-            )
-
-            docs.append(image_doc)
-        
-        except Exception as e:
-            print(f"Image analysis failed: {e}")
+    process_func = partial(process_image, file_path=file_path)
+    
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        image_docs = list(executor.map(process_func, image_paths))
+    
+    docs.extend([doc for doc in image_docs if doc])
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=150
+        chunk_size=800,
+        chunk_overlap=100
     )
     chunks = text_splitter.split_documents(docs)
 
-    embeddings = OllamaEmbeddings(model=embedding_model)
-    new_store = FAISS.from_documents(chunks, embeddings)
-
-    existing_store.merge_from(new_store)
+    existing_store.add_documents(chunks)
     existing_store.save_local(FAISS_INDEX_PATH)
+
 
     return existing_store
 
@@ -285,7 +287,7 @@ Your answers must be:
 
     return ""
 
-def image_resize(image_path, max_size=1024):
+def image_resize(image_path, max_size=448):
     img = Image.open(image_path)
     img.thumbnail((max_size, max_size))
     img.save(image_path)
@@ -293,22 +295,27 @@ def image_resize(image_path, max_size=1024):
 
 def analyze_image_with_vision_llm(image_path):
 
+    
     prompt = """
-You are a radiology interpretation assistant.
+You are an advanced document and medical image analysis assistant. Examine the provided image carefully and extract all relevant information.
 
-STRICT:
-- Extract only visible findings.
-- Do NOT diagnose.
-- No treatment advice.
-- Mention uncertainty if applicable.
+1. Identify the image type: MRI, CT, X-ray, Ultrasound, chart, table, diagram, or text.
+2. Extract visible text exactly as written.
+3. Describe charts, tables, or diagrams, summarizing key points.
+4. For medical images:
+   - Note visible anatomical structures and abnormalities.
+   - Provide a ranked differential diagnosis based only on visible findings (High / Moderate / Low likelihood).
+   - Mention uncertainty or limitations.
+5. Ignore irrelevant visual details.
 
-Output format:
-- Image Type:
-- Observed Abnormalities:
-- Measurements (if visible):
-- Possible Clinical Relevance:
-- Confidence Level:
+STRICT RULES:
+- Do not invent measurements, findings, or patient information.
+- Do not give definitive diagnoses or treatment advice.
+- Clearly state uncertainty where applicable.
+
 """
+
+
 
     image_resize(image_path)
 
@@ -316,12 +323,16 @@ Output format:
         image_bytes = f.read()
 
     resp = ollama.chat(
-        model="llava:7b",
+        model="llava-phi3:3.8b",
         messages=[{
             "role": "user",
             "content": prompt,
             "images": [image_bytes]
-        }]
+        }],
+        options={
+        "num_predict": 400,   # limit output tokens
+        "temperature": 0.2
+        }
     )
 
     return resp["message"]["content"]
@@ -350,6 +361,7 @@ def extract_images_from_pdf(file_path, output_folder="temp_images"):
 
             with open(image_filename, "wb") as f:
                 f.write(image_bytes)
-
-            image_path.append(image_filename)
+            
+            if os.path.getsize(image_filename) > 50_000:
+                image_path.append(image_filename)
     return image_path

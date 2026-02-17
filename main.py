@@ -186,12 +186,17 @@ if process_btn:
                         img_file_path = os.path.join("temp_images", img.name)
                         with open(img_file_path, "wb") as f:
                             f.write(img.getbuffer())
+                        
+                        print("Analysis 1.0 done")
 
                         # run vision LLM to extract findings, stored as a small text doc
                         image_findings = analyze_image_with_vision_llm(img_file_path)
+                        print("Analysis 1.1 done")
                         findings_txt_path = os.path.join("temp_docs", f"{img.name}_findings.txt")
                         with open(findings_txt_path, "w", encoding="utf-8") as f:
                             f.write(image_findings)
+
+                        print("Analysis 2 done")
 
                         if st.session_state.vector_store is None:
                             st.session_state.vector_store = create_vector_store(findings_txt_path)
@@ -201,6 +206,8 @@ if process_btn:
                             )
 
                         st.session_state.processed_images.add(img.name)
+
+                        print("Analysis 3 done")
 
                 # create/update rag chain
                 if st.session_state.vector_store:

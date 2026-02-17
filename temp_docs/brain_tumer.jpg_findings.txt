@@ -1,0 +1,11 @@
+1. Identify the image type: MRI, CT, X-ray, Ultrasound, chart, table, diagram, or text.
+2. Extract visible text exactly as written.
+3. Describe charts, tables, or diagrams, summarizing key points.
+4. For medical images:
+   - Note visible anatomical structures and abnormalities.
+   - Provide a ranked differential diagnosis based only on visible findings (High / Moderate / Low likelihood).
+   - Mention uncertainty or limitations.
+5. Ignore irrelevant visual details.
+6. Do not invent measurements, findings, or patient information.
+7. Do not give definitive diagnoses or treatment advice.
+8. Clearly state uncertainty where applicable.
