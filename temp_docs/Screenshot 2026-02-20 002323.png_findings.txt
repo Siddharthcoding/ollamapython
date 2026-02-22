@@ -1,0 +1,11 @@
+CNN MODEL PREDICTION:
+Predicted Class: pituitary_tumor
+Confidence: 90.99%
+
+
+VISION MODEL ANALYSIS:
+1. The image is a medical MRI scan of the brain.
+2. There are no visible texts in the image.
+3. The image shows a clear view of the brain's anatomy, including the skull and cerebral hemispheres.
+4. A small lesion or abnormality is present in the left temporal lobe.
+5. The likelihood of this finding being indicative of a specific condition cannot be determined without further information.
