@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../Downloads/brain_tumor_dataset"
+		}
+	],
+	"settings": {}
+}
