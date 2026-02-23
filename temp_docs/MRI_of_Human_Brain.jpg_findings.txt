@@ -1,14 +1,14 @@
 CNN MODEL PREDICTION:
-Predicted Class: pituitary_tumor
-Confidence: 76.06%
+Predicted Class: no_tumor
+Confidence: 64.15%
 
 
 VISION MODEL ANALYSIS:
 1. The image is a medical MRI scan of the brain.
 2. There are no visible texts in the image.
-3. The MRI shows a clear view of the brain's anatomy, including the cerebral cortex and ventricles. However, there are no specific abnormalities or lesions visible.
-4. Based on the available information:
-	* High likelihood: No evidence of acute intracranial pathology (e.g., hemorrhage, infarction)
-	* Moderate likelihood: Normal age-related brain atrophy
-	* Low likelihood: Neurodegenerative disease or other structural abnormality not visible on this scan
-5. The image does not provide enough information to confidently diagnose any specific condition, and further evaluation may be necessary if clinically indicated.
+3. The MRI shows a clear view of the brain's anatomy, including the cerebral cortex and ventricles. No abnormalities or lesions are visible.
+4. Based on the findings:
+   - High likelihood: Normal brain structure without any signs of disease or injury.
+   - Moderate likelihood: Cannot rule out subtle pathology not visible in this image, such as microvascular changes or early-stage neurodegenerative disorders.
+   - Low likelihood: Unlikely given the clear and unremarkable appearance of the brain on MRI.
+5. The limitations of this analysis are that it is based solely on a single point in time and does not account for patient symptoms or history, which could provide additional context for interpretation.

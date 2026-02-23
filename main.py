@@ -195,19 +195,15 @@ def render_qa(s: dict):
         st.subheader(f"Answer ({s['persona']})")
         with st.spinner("Thinking…"):
             try:
-                stream = s["rag_chain"].stream({"input": s["last_question"]})
-                answer_container = st.empty()
-                full_answer = ""
-                for chunk in stream:
-                    if isinstance(chunk, dict):
-                        token = chunk.get("answer") or chunk.get("output_text") or str(chunk)
-                        context = chunk.get("context") or chunk.get("source_documents") or []
-                    else:
-                        token = str(chunk)
-                        context = []
+                response = s["rag_chain"].invoke({"input": s["last_question"]})
+                if isinstance(response, dict):
+                    answer_text = response.get("answer") or response.get("output_text") or str(response)
+                    context = response.get("context") or response.get("source_documents") or []
+                else:
+                    answer_text = str(response)
+                    context = []
 
-                    full_answer += token
-                    st.markdown(full_answer)
+                st.markdown(answer_text)
 
                 if context:
                     with st.expander("Retrieved Context (top documents)"):

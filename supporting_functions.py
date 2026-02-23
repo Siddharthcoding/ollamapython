@@ -304,7 +304,7 @@ def image_resize(image_path, max_size=448):
     img.save(image_path)
 
 
-def analyze_image_with_vision_llm(image_path):
+def analyze_image_with_vision_llm(findings_text,image_path):
 
     
     prompt = """
@@ -337,7 +337,7 @@ STRICT RULES:
         model="llava-phi3:3.8b",
         messages=[{
             "role": "user",
-            "content": prompt,
+            "content": f"{prompt}\n\n{findings_text}",
             "images": [image_bytes]
         }],
         options={
@@ -388,11 +388,19 @@ def load_pickle_model():
     return model
 
 def load_class_name():
-    if os.path.exists(CLASS_NAMES_PATH):
-        import json
-        with open(CLASS_NAMES_PATH, "r") as f:
-            return json.load(f)
-    return ["glioma", "meningioma", "pituitary_tumor", "no_tumor"]
+    if not os.path.exists(CLASS_NAMES_PATH):
+        raise FileNotFoundError("Dir not found")
+
+    import json
+    with open(CLASS_NAMES_PATH, "r") as f:
+        data = json.load(f)
+
+    # If it's a dict, convert to ordered list
+    if isinstance(data, dict):
+        # sort by index value
+        return [k for k, v in sorted(data.items(), key=lambda item: item[1])]
+
+    return data
 
 def processes_image(image_path, target_size=(150,150)):
     img = Image.open(image_path).convert("RGB")
