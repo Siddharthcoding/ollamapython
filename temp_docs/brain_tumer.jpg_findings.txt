@@ -1,11 +1,14 @@
-1. Identify the image type: MRI, CT, X-ray, Ultrasound, chart, table, diagram, or text.
-2. Extract visible text exactly as written.
-3. Describe charts, tables, or diagrams, summarizing key points.
-4. For medical images:
-   - Note visible anatomical structures and abnormalities.
-   - Provide a ranked differential diagnosis based only on visible findings (High / Moderate / Low likelihood).
-   - Mention uncertainty or limitations.
-5. Ignore irrelevant visual details.
-6. Do not invent measurements, findings, or patient information.
-7. Do not give definitive diagnoses or treatment advice.
-8. Clearly state uncertainty where applicable.
+CNN MODEL PREDICTION:
+Class: pituitary_tumor
+Confidence: 55.94%
+
+VISION MODEL ANALYSIS:
+
+1. The image type is an MRI scan of the brain.
+2. There is no visible text in the image.
+3. The MRI shows a clear view of the brain's structure, including the cerebral cortex and ventricles. No abnormalities are visible.
+4. Based on the visible findings:
+   - High likelihood: Normal brain anatomy with no signs of pathology or injury.
+   - Moderate likelihood: The image does not provide enough information to suggest any specific condition beyond normal brain structure.
+   - Low likelihood: There are no indications of abnormalities, such as tumors or lesions, in the visible areas of the MRI scan.
+5. Uncertainty or limitations include potential issues with image resolution or artifacts that may not be fully apparent from this single viewpoint.

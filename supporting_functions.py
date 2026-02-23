@@ -178,13 +178,13 @@ Structured Answer:
 """)
 ])
 
-    print("prediction underway")
+    print("Action underway")
 
     retriever = vector_store.as_retriever(search_kwargs={"k": 6})
     document_chain = create_stuff_documents_chain(llm, prompt)
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
-    print("prediction done")
+    print("Action done")
 
     return retrieval_chain
 

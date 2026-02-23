@@ -191,20 +191,23 @@ def render_qa(s: dict):
         else:
             s["last_question"] = user_q.strip()
             s["answer_generated"] = True
-
     if s["last_question"] and s["answer_generated"]:
         st.subheader(f"Answer ({s['persona']})")
         with st.spinner("Thinking…"):
             try:
-                response = s["rag_chain"].invoke({"input": s["last_question"]})
-                if isinstance(response, dict):
-                    answer_text = response.get("answer") or response.get("output_text") or str(response)
-                    context = response.get("context") or response.get("source_documents") or []
-                else:
-                    answer_text = str(response)
-                    context = []
+                stream = s["rag_chain"].stream({"input": s["last_question"]})
+                answer_container = st.empty()
+                full_answer = ""
+                for chunk in stream:
+                    if isinstance(chunk, dict):
+                        token = chunk.get("answer") or chunk.get("output_text") or str(chunk)
+                        context = chunk.get("context") or chunk.get("source_documents") or []
+                    else:
+                        token = str(chunk)
+                        context = []
 
-                st.markdown(answer_text)
+                    full_answer += token
+                    st.markdown(full_answer)
 
                 if context:
                     with st.expander("Retrieved Context (top documents)"):
@@ -467,12 +470,16 @@ def page_medical():
                                 st.error(f"CNN prediction failed: {e}")
                                 findings_text = "CNN prediction failed.\n"
 
+                            print("Stage 1 completed")
+
                             # Step 2: vision LLM analysis
                             try:
                                 vision_out = analyze_image_with_vision_llm(ip)
                                 findings_text += "\n\nVISION MODEL ANALYSIS:\n" + vision_out
                             except Exception:
                                 findings_text += "\n\nVision analysis failed."
+                            
+                            print("Stage 2 completed")
 
                             # Save findings and index
                             txt_path = os.path.join("temp_docs", f"{img.name}_findings.txt")
@@ -486,11 +493,15 @@ def page_medical():
 
                             s["processed_images"].add(img.name)
 
+
                     # Build RAG chain with MEDICAL persona
                     if s["vector_store"]:
                         s["rag_chain"] = create_rag_chain(s["vector_store"], "MEDICAL")
                     s["pdf_processed"] = True
                     st.success(f"✔ Done in {time.time()-start:.2f}s — {len(new_files)} report(s), {len(new_images)} scan(s)")
+
+                    print("Stage 3 completed")
+
 
                 except Exception as e:
                     st.error(f"Error while processing: {e}")

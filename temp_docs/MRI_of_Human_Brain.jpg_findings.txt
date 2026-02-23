@@ -1,9 +1,14 @@
-1. Modality: The image is a black and white X-ray of the brain. Region: The focus is on the frontal lobe, specifically the left prefrontal area.
-2. Key radiological findings: There are no visible abnormalities or lesions in the left prefrontal area. The bone structure appears normal with no signs of fractures or dislocations.
-3. Differential diagnosis: 
-   - High likelihood: Normal X-ray, no further action required.
-   - Moderate likelihood: Further imaging may be necessary to rule out any potential issues not visible on this X-ray.
-   - Low likelihood: The image does not provide enough information to suggest a specific diagnosis or treatment plan.
-4. Uncertainty and limitations: As the image is black and white, it may not reveal certain details that could be present in color images. Additionally, an X-ray provides limited information about soft tissue structures within the brain. Further imaging with MRI or CT scans may provide more comprehensive information for a definitive diagnosis.
-5. Treatment advice: No treatment is necessary based on this image alone. If symptoms persist or worsen, further evaluation and potential imaging should be considered.
-6. Definitive diagnosis: Based on the available information, no definitive diagnosis can be made. Further testing may be required to determine the cause of any symptoms experienced by the patient.
+CNN MODEL PREDICTION:
+Predicted Class: pituitary_tumor
+Confidence: 76.06%
+
+
+VISION MODEL ANALYSIS:
+1. The image is a medical MRI scan of the brain.
+2. There are no visible texts in the image.
+3. The MRI shows a clear view of the brain's anatomy, including the cerebral cortex and ventricles. However, there are no specific abnormalities or lesions visible.
+4. Based on the available information:
+	* High likelihood: No evidence of acute intracranial pathology (e.g., hemorrhage, infarction)
+	* Moderate likelihood: Normal age-related brain atrophy
+	* Low likelihood: Neurodegenerative disease or other structural abnormality not visible on this scan
+5. The image does not provide enough information to confidently diagnose any specific condition, and further evaluation may be necessary if clinically indicated.
