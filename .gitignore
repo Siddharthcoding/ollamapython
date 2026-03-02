@@ -2,3 +2,8 @@
 /.idea
 /venv311
 models/brain_tumor_model.h5
+Data
+__pycache__/
+/temp_audio
+/temp_docs
+/temp_images
