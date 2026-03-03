@@ -285,7 +285,7 @@ STRICT RULES:
     image_resize(image_path)
     with open(image_path, "rb") as f:
         image_bytes = f.read()
-
+    print("imaging")
     resp = ollama.chat(
         model="llava-phi3:3.8b",
         messages=[{
@@ -295,6 +295,7 @@ STRICT RULES:
         }],
         options={"num_predict": 400, "temperature": 0.2}
     )
+    print(resp["message"]["content"])
     return resp["message"]["content"]
 
 
