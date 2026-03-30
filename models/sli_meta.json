@@ -1,69 +1,60 @@
 {
-  "classes": [
+  "version": "v16",
+  "feature_set": "MFCC26+PNCC26+CQCC20+Spectral+Prosodic (305-dim)",
+  "n_features": 305,
+  "binary_classes": [
     "healthy",
-    "sli_mild",
-    "sli_moderate",
-    "sli_severe"
+    "sli"
   ],
-  "n_features": 47,
-  "feature_names": [
-    "MFCC_0_mean",
-    "MFCC_1_mean",
-    "MFCC_2_mean",
-    "MFCC_3_mean",
-    "MFCC_4_mean",
-    "MFCC_5_mean",
-    "MFCC_6_mean",
-    "MFCC_7_mean",
-    "MFCC_8_mean",
-    "MFCC_9_mean",
-    "MFCC_10_mean",
-    "MFCC_11_mean",
-    "MFCC_12_mean",
-    "MFCC_0_std",
-    "MFCC_1_std",
-    "MFCC_2_std",
-    "MFCC_3_std",
-    "MFCC_4_std",
-    "MFCC_5_std",
-    "MFCC_6_std",
-    "MFCC_7_std",
-    "MFCC_8_std",
-    "MFCC_9_std",
-    "MFCC_10_std",
-    "MFCC_11_std",
-    "MFCC_12_std",
-    "F0_mean",
-    "F0_std",
-    "F0_min",
-    "F0_max",
-    "Voiced_ratio",
-    "Jitter_%",
-    "Shimmer_%",
-    "Spectral_centroid",
-    "Spectral_bandwidth",
-    "Spectral_rolloff",
-    "Spectral_flatness",
-    "ZCR_mean",
-    "ZCR_std",
-    "RMS_mean",
-    "RMS_std",
-    "F1_mean",
-    "F1_std",
-    "F2_mean",
-    "F2_std",
-    "F3_mean",
-    "F3_std"
+  "severity_classes": [
+    "mild",
+    "moderate",
+    "severe"
   ],
-  "use_severity": true,
-  "n_train_samples": 3817,
-  "label_distribution": {
-    "healthy": 1674,
-    "sli_mild": 1621,
-    "sli_moderate": 286,
-    "sli_severe": 236
+  "metrics": {
+    "accuracy": 0.9325551232166018,
+    "balanced_accuracy": 0.9297311165845649,
+    "f1": 0.9409090909090909
   },
-  "cv_accuracy": 0.8965968586387435,
-  "cv_balanced_accuracy": 0.7551534643090859,
-  "classification_report": "              precision    recall  f1-score   support\n\n     healthy       0.98      1.00      0.99       335\n    sli_mild       0.90      0.90      0.90       325\nsli_moderate       0.55      0.53      0.54        57\n  sli_severe       0.67      0.60      0.63        47\n\n    accuracy                           0.90       764\n   macro avg       0.77      0.76      0.76       764\nweighted avg       0.89      0.90      0.89       764\n"
+  "severity_model_trained": true,
+  "severity_n_features": 21,
+  "severity_feature_strategy": "21-dim p(SLI) profile from trained binary classifier. Features: 7 per-task p(SLI) + 4 group means + 3 group stds + 3 counts-above-0.5 + 4 derived (ranges, overall_std). Labels: tertile split on overall_mean p(SLI).",
+  "severity_metrics": {
+    "kfold_balanced_acc": {
+      "RF": 0.861111111111111,
+      "ET": 0.8444444444444444,
+      "GB": 0.9222222222222222,
+      "XGB": 0.9666666666666666
+    },
+    "loo_balanced_acc": {
+      "RF": 0.8888888888888888,
+      "ET": 0.9259259259259259,
+      "GB": 0.9444444444444444,
+      "XGB": 0.9629629629629629
+    },
+    "best_loo": 0.9629629629629629
+  },
+  "severity_features": [
+    "psli_SAMHOL",
+    "psli_SOUHL",
+    "psli_1SL",
+    "psli_2SL",
+    "psli_3SL",
+    "psli_4SL",
+    "psli_VSL",
+    "easy_mean",
+    "medium_mean",
+    "hard_mean",
+    "overall_mean",
+    "easy_std",
+    "medium_std",
+    "hard_std",
+    "n_easy_ge05",
+    "n_medium_ge05",
+    "n_hard_ge05",
+    "easy_range",
+    "medium_range",
+    "hard_range",
+    "overall_std"
+  ]
 }

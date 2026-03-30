@@ -1,625 +1,794 @@
 """
-sli_audio_functions.py
-─────────────────────────────────────────────────────────────────────────────
-All audio-related helpers for the LANNA SLI pipeline:
-  • WAV loading & pre-processing
-  • Feature extraction  (MFCCs, pitch, formant-proxies, jitter/shimmer, ZCR,
-                         energy, spectral features)
-  • SLI classifier inference
-  • Whisper transcription (optional – falls back gracefully if not installed)
-  • RAG indexing of audio findings
-─────────────────────────────────────────────────────────────────────────────
-Dependencies (all available in your env):
-    numpy, scipy, scikit-learn, joblib, matplotlib, streamlit
-Optional:
-    openai-whisper  →  pip install openai-whisper
+sli_audio_functions.py  -- LANNA SLI Pipeline v16
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BINARY FEATURES  (305-dim per utterance):
+  MFCC  26 coeffs × 4 stats (mean/std/Δmean/Δstd) = 104
+  PNCC  26 coeffs × 4 stats                        = 104
+  CQCC  20 bins   × 4 stats                        =  80
+  Spectral (centroid/spread/skew/kurt/flux/         =   9
+            rolloff/HNR_spec/jitter/shimmer)
+  Prosodic (voiced_ratio/energy_mean/std/           =   8
+            F0_mean/std/range/ZCR/HNR)
+  ─────────────────────────────────────────────────
+  TOTAL                                             = 305
+
+SEVERITY FEATURES  (21-dim per speaker, inference):
+  Identical to training: per-task p(SLI) from binary model → 21-dim profile.
+  This ensures training/inference feature alignment.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-import os
-import io
-import json
-import struct
-import warnings
+import os, json, tempfile, warnings
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.io import wavfile
-from scipy.signal import lfilter, find_peaks
-try:
-    from scipy.signal import hamming          # scipy < 1.8
-except ImportError:
-    from scipy.signal.windows import hamming  # scipy >= 1.8
-from scipy.fft import fft, fftfreq
 import joblib
-import warnings
+
 warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────
-# Paths
-# ─────────────────────────────────────────────
-SLI_MODEL_PATH   = "models/sli_classifier.pkl"
-SLI_SCALER_PATH  = "models/sli_scaler.pkl"
-SLI_META_PATH    = "models/sli_meta.json"
+# ─── Model paths ────────────────────────────────────────────────────────────
+SLI_MODEL_PATH        = "models/sli_binary_clf.pkl"
+SLI_SCALER_PATH       = "models/sli_binary_scaler.pkl"
+SLI_META_PATH         = "models/sli_meta.json"
+SLI_SEV_MODEL_PATH    = "models/sli_severity_clf.pkl"
+SLI_SEV_SCALER_PATH   = "models/sli_severity_scaler.pkl"
+SLI_BINARY_CLF_PATH   = SLI_MODEL_PATH
+SLI_BINARY_SCL_PATH   = SLI_SCALER_PATH
+SLI_SEVERITY_CLF_PATH = SLI_SEV_MODEL_PATH
+SLI_SEVERITY_SCL_PATH = SLI_SEV_SCALER_PATH
 
+# ─── Task constants ──────────────────────────────────────────────────────────
+TASK_ORDER = ["SAMHOL", "SOUHL", "1SL", "2SL", "3SL", "4SL", "VSL"]
+TASK_LABELS = {
+    "SAMHOL": "Vowels",        "SOUHL": "Consonants",
+    "1SL":    "Syllables",     "2SL":   "Words (2-syl)",
+    "3SL":    "Words (3-syl)", "4SL":   "Words (4-syl)",
+    "VSL":    "Sentences",
+}
+TASK_COMPLEXITY      = {t: i for i, t in enumerate(TASK_ORDER)}
+EASY_TASKS           = ["SAMHOL", "SOUHL"]
+MEDIUM_TASKS         = ["1SL", "2SL"]
+HARD_TASKS           = ["3SL", "4SL", "VSL"]
+ALL_CLASSES          = ["healthy", "mild", "moderate", "severe"]
+BINARY_SLI_THRESHOLD = 0.5
 
-# ═════════════════════════════════════════════
-#  1.  WAV LOADING
-# ═════════════════════════════════════════════
+# ─── Feature dimensions ──────────────────────────────────────────────────────
+N_MFCC       = 26
+N_PNCC       = 26
+N_CQT_BINS   = 20
+N_SPECTRAL   = 9
+N_PROSODIC   = 8
 
-def load_wav(path: str):
-    """
-    Load a WAV file.  Returns (signal_float32, sample_rate).
-    Handles stereo → mono by averaging channels.
-    Resamples to 16 kHz for uniform feature extraction.
-    """
+N_MFCC_FEATS = N_MFCC     * 4   # 104
+N_PNCC_FEATS = N_PNCC     * 4   # 104
+N_CQCC_FEATS = N_CQT_BINS * 4   # 80
+N_SPEC_FEATS = N_SPECTRAL        # 9
+N_PROS_FEATS = N_PROSODIC        # 8
+
+N_UTT_FEATS  = N_MFCC_FEATS + N_PNCC_FEATS + N_CQCC_FEATS + N_SPEC_FEATS + N_PROS_FEATS  # 305
+N_FEATURES   = N_UTT_FEATS
+
+# Severity: 21-dim p(SLI) profile (training and inference are identical)
+N_SEV_GROUP_FEATS = 10   # legacy compat
+N_SEV_FEATS       = 21
+
+FEATURE_NAMES = (
+    [f"mfcc{i+1}_mean"  for i in range(N_MFCC)] +
+    [f"mfcc{i+1}_std"   for i in range(N_MFCC)] +
+    [f"mfcc{i+1}_dmean" for i in range(N_MFCC)] +
+    [f"mfcc{i+1}_dstd"  for i in range(N_MFCC)] +
+    [f"pncc{i+1}_mean"  for i in range(N_PNCC)] +
+    [f"pncc{i+1}_std"   for i in range(N_PNCC)] +
+    [f"pncc{i+1}_dmean" for i in range(N_PNCC)] +
+    [f"pncc{i+1}_dstd"  for i in range(N_PNCC)] +
+    [f"cqcc{i+1}_mean"  for i in range(N_CQT_BINS)] +
+    [f"cqcc{i+1}_std"   for i in range(N_CQT_BINS)] +
+    [f"cqcc{i+1}_dmean" for i in range(N_CQT_BINS)] +
+    [f"cqcc{i+1}_dstd"  for i in range(N_CQT_BINS)] +
+    ["spec_centroid","spec_spread","spec_skewness","spec_kurtosis",
+     "spec_flux","spec_rolloff","hnr_spec","jitter","shimmer"] +
+    ["voiced_ratio","energy_mean","energy_std",
+     "f0_mean","f0_std","f0_range","zcr_mean","hnr"]
+)
+
+TASK_FEAT_DIM   = 1
+_PER_TASK_NAMES = ["task_psli"]
+
+# ════════════════════════════════════════════════════════════════════════════
+#  WAV I/O
+# ════════════════════════════════════════════════════════════════════════════
+
+def load_wav(path, target_sr=16000):
     sr, data = wavfile.read(path)
-
-    # convert to float32 in [-1, 1]
-    if data.dtype == np.int16:
-        data = data.astype(np.float32) / 32768.0
-    elif data.dtype == np.int32:
-        data = data.astype(np.float32) / 2147483648.0
-    elif data.dtype == np.uint8:
-        data = (data.astype(np.float32) - 128.0) / 128.0
-    else:
-        data = data.astype(np.float32)
-
-    # stereo → mono
+    if   data.dtype == np.int16:  data = data.astype(np.float32) / 32768.0
+    elif data.dtype == np.int32:  data = data.astype(np.float32) / 2147483648.0
+    elif data.dtype == np.uint8:  data = (data.astype(np.float32) - 128.0) / 128.0
+    else:                         data = data.astype(np.float32)
     if data.ndim == 2:
         data = data.mean(axis=1)
-
-    # resample to 16 kHz using simple decimation/interpolation
-    target_sr = 16000
     if sr != target_sr:
-        ratio = target_sr / sr
-        new_len = int(len(data) * ratio)
-        indices = np.linspace(0, len(data) - 1, new_len)
-        data = np.interp(indices, np.arange(len(data)), data)
-        sr = target_sr
-
+        n    = int(len(data) * target_sr / sr)
+        data = np.interp(np.linspace(0, len(data)-1, n), np.arange(len(data)), data)
+        sr   = target_sr
+    pk = np.abs(data).max()
+    if pk > 1e-6: data /= pk
     return data.astype(np.float32), sr
 
 
-def trim_silence(signal: np.ndarray, threshold: float = 0.01) -> np.ndarray:
-    """Remove leading/trailing near-silence."""
-    energy = signal ** 2
-    mask = energy > threshold * energy.max()
-    indices = np.where(mask)[0]
-    if len(indices) == 0:
-        return signal
-    return signal[indices[0]: indices[-1] + 1]
+def trim_silence(sig, sr, threshold_db=-38, frame_ms=20):
+    fl    = int(sr * frame_ms / 1000)
+    steps = list(range(0, len(sig)-fl, fl//2))
+    if not steps: return sig
+    rms_db = [20*np.log10(max(np.sqrt(np.mean(sig[i:i+fl]**2)), 1e-9)) for i in steps]
+    thr    = max(rms_db) + threshold_db
+    vi     = [i for i, d in enumerate(rms_db) if d > thr]
+    if not vi: return sig
+    return sig[max(0, vi[0]*fl//2): min(len(sig), (vi[-1]+1)*fl//2+fl)]
+
+# ════════════════════════════════════════════════════════════════════════════
+#  DSP HELPERS
+# ════════════════════════════════════════════════════════════════════════════
+
+def _frames(sig, sr, frame_ms=25, step_ms=10):
+    fl = int(sr*frame_ms/1000); fs = int(sr*step_ms/1000)
+    if len(sig) < fl: sig = np.pad(sig, (0, fl-len(sig)))
+    n   = 1 + (len(sig)-fl)//fs
+    out = np.zeros((n, fl), np.float32)
+    for i in range(n): out[i] = sig[i*fs: i*fs+fl]
+    return out, fl, fs
 
 
-# ═════════════════════════════════════════════
-#  2.  FEATURE EXTRACTION
-# ═════════════════════════════════════════════
-
-def _preemphasis(signal, coeff=0.97):
-    return np.append(signal[0], signal[1:] - coeff * signal[:-1])
-
-
-def _framing(signal, sr, frame_ms=25, step_ms=10):
-    frame_len  = int(sr * frame_ms  / 1000)
-    frame_step = int(sr * step_ms   / 1000)
-    num_frames = 1 + (len(signal) - frame_len) // frame_step
-    frames = np.stack([
-        signal[i * frame_step: i * frame_step + frame_len]
-        for i in range(num_frames)
-    ])
-    window = np.hamming(frame_len)
-    return frames * window, frame_len, frame_step
+def _mel_filterbank(sr, n_fft, n_mels=52, fmin=80.0, fmax=None):
+    fmax = fmax or min(sr/2.0, 8000.0)
+    mmin = 2595*np.log10(1+fmin/700); mmax = 2595*np.log10(1+fmax/700)
+    mp   = np.linspace(mmin, mmax, n_mels+2)
+    hp   = 700*(10**(mp/2595)-1)
+    bns  = np.clip(np.floor((n_fft+1)*hp/sr).astype(int), 0, n_fft//2)
+    fb   = np.zeros((n_mels, n_fft//2+1))
+    for m in range(1, n_mels+1):
+        lo, mid, hi = bns[m-1], bns[m], bns[m+1]
+        for k in range(lo, mid):
+            if mid > lo: fb[m-1,k] = (k-lo)/(mid-lo)
+        for k in range(mid, hi):
+            if hi > mid: fb[m-1,k] = (hi-k)/(hi-mid)
+    return fb
 
 
-def extract_mfcc(signal, sr, n_mfcc=13, n_fft=512, n_mels=26):
-    """Return (n_mfcc,) mean + (n_mfcc,) std  →  2*n_mfcc values."""
-    signal = _preemphasis(signal)
-    frames, frame_len, _ = _framing(signal, sr)
+def _delta(coef):
+    T, D  = coef.shape; delta = np.zeros_like(coef)
+    if T < 3: return delta
+    for t in range(1, T-1): delta[t] = (coef[t+1]-coef[t-1])/2.0
+    delta[0] = delta[1]; delta[-1] = delta[-2]
+    return delta
 
-    # power spectrum
-    mag = np.abs(np.fft.rfft(frames, n=n_fft)) ** 2
+# ════════════════════════════════════════════════════════════════════════════
+#  MFCC  (26 coefficients)
+# ════════════════════════════════════════════════════════════════════════════
 
-    # mel filterbank
-    fmin, fmax = 0, sr / 2
-    mel_min = 2595 * np.log10(1 + fmin / 700)
-    mel_max = 2595 * np.log10(1 + fmax / 700)
-    mel_pts = np.linspace(mel_min, mel_max, n_mels + 2)
-    hz_pts  = 700 * (10 ** (mel_pts / 2595) - 1)
-    bins    = np.floor((n_fft + 1) * hz_pts / sr).astype(int)
-
-    fbank = np.zeros((n_mels, n_fft // 2 + 1))
-    for m in range(1, n_mels + 1):
-        f_m_minus, f_m, f_m_plus = bins[m-1], bins[m], bins[m+1]
-        for k in range(f_m_minus, f_m):
-            if f_m != f_m_minus:
-                fbank[m-1, k] = (k - f_m_minus) / (f_m - f_m_minus)
-        for k in range(f_m, f_m_plus):
-            if f_m_plus != f_m:
-                fbank[m-1, k] = (f_m_plus - k) / (f_m_plus - f_m)
-
-    filter_banks = np.dot(mag, fbank.T)
-    filter_banks = np.where(filter_banks == 0, np.finfo(float).eps, filter_banks)
-    filter_banks = 20 * np.log10(filter_banks)
-
-    # DCT
-    n_frames, _ = filter_banks.shape
-    mfcc = np.zeros((n_frames, n_mfcc))
+def _compute_mfcc(sig, sr, n_mfcc=None, n_fft=512, n_mels=None):
+    if n_mfcc is None: n_mfcc = N_MFCC
+    if n_mels is None: n_mels = max(52, n_mfcc*2)
+    fr, fl, _ = _frames(sig, sr)
+    if len(fr) == 0: return np.zeros((0, n_mfcc), np.float32)
+    win = np.hamming(fl).astype(np.float32)
+    mag = np.abs(np.fft.rfft(fr*win, n=n_fft))**2
+    fb  = _mel_filterbank(sr, n_fft, n_mels)
+    fbe = np.dot(mag, fb.T)
+    fbe = np.where(fbe < 1e-9, 1e-9, fbe); fbe = 20*np.log10(fbe)
+    mfcc = np.zeros((len(fr), n_mfcc), np.float32)
     for n in range(n_mfcc):
-        mfcc[:, n] = np.sum(
-            filter_banks * np.cos(np.pi * n / n_mels * (np.arange(n_mels) + 0.5)),
-            axis=1
-        )
+        mfcc[:,n] = (fbe * np.cos(np.pi*(n+1)/n_mels*(np.arange(n_mels)+0.5))).sum(1)
+    return mfcc
 
-    return np.concatenate([mfcc.mean(axis=0), mfcc.std(axis=0)])   # 26 values
+# ════════════════════════════════════════════════════════════════════════════
+#  PNCC  (26 coefficients, gammatone-inspired)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _gammatone_filterbank(sr, n_fft, n_filters=52, fmin=80.0, fmax=None):
+    fmax    = fmax or min(sr/2.0, 8000.0)
+    erb_min = 9.265*np.log(1+fmin/(24.7*9.265))
+    erb_max = 9.265*np.log(1+fmax/(24.7*9.265))
+    erb_pts = np.linspace(erb_min, erb_max, n_filters+2)
+    cf      = 24.7*9.265*(np.exp(erb_pts/9.265)-1)
+    freqs   = np.linspace(0, sr/2.0, n_fft//2+1)
+    fb      = np.zeros((n_filters, n_fft//2+1), np.float32)
+    for m in range(n_filters):
+        fc = cf[m+1]; bw = 24.7*(4.37*fc/1000+1)
+        fb[m] = np.exp(-0.5*((freqs-fc)/(bw*0.8))**2)
+    fb = fb / (fb.sum(axis=1, keepdims=True) + 1e-9)
+    return fb
 
 
-def extract_pitch_features(signal, sr, frame_ms=40, step_ms=10,
-                            f0_min=60, f0_max=500):
+def _compute_pncc(sig, sr, n_pncc=None, n_fft=512, n_filters=None, power=1.0/15.0):
+    if n_pncc    is None: n_pncc    = N_PNCC
+    if n_filters is None: n_filters = max(52, n_pncc*2)
+    fr, fl, _ = _frames(sig, sr)
+    if len(fr) == 0: return np.zeros((0, n_pncc), np.float32)
+    win      = np.hamming(fl).astype(np.float32)
+    mag      = np.abs(np.fft.rfft(fr*win, n=n_fft))**2
+    fb       = _gammatone_filterbank(sr, n_fft, n_filters)
+    fbe      = np.dot(mag, fb.T)
+    mp       = np.median(fbe, axis=0)
+    fbe_norm = np.maximum(fbe - mp[None,:], 0.0)
+    fbe_norm = np.where(fbe_norm < 1e-9, 1e-9, fbe_norm)
+    fbe_comp = fbe_norm**power
+    pncc     = np.zeros((len(fr), n_pncc), np.float32)
+    for n in range(n_pncc):
+        pncc[:,n] = (fbe_comp * np.cos(np.pi*(n+1)/n_filters*(np.arange(n_filters)+0.5))).sum(1)
+    return pncc
+
+# ════════════════════════════════════════════════════════════════════════════
+#  CQCC  (20 bins)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _compute_cqcc(sig, sr, n_bins=None, fmin=80.0, bins_per_octave=12, n_fft=512):
+    if n_bins is None: n_bins = N_CQT_BINS
+    fr, fl, _ = _frames(sig, sr)
+    if len(fr) == 0: return np.zeros((0, n_bins), np.float32)
+    win   = np.hamming(fl).astype(np.float32)
+    mag   = np.abs(np.fft.rfft(fr*win, n=n_fft))**2
+    freqs = np.linspace(0, sr/2.0, n_fft//2+1)
+    n_oct = int(np.floor(np.log2((sr/2.0)/fmin)))
+    n_cqf = min(n_oct*bins_per_octave, 96)
+    cf    = fmin*2.0**(np.arange(n_cqf)/bins_per_octave)
+    cf    = cf[cf < sr/2.0*0.95]
+    if len(cf) == 0: return np.zeros((len(fr), n_bins), np.float32)
+    Q  = 1.0/(2**(1.0/bins_per_octave)-1)
+    fb = np.zeros((len(cf), n_fft//2+1), np.float32)
+    for m, fc in enumerate(cf):
+        bw = fc/Q; fb[m] = np.exp(-0.5*((freqs-fc)/(bw*0.5))**2)
+    fb      = fb/(fb.sum(axis=1, keepdims=True)+1e-9)
+    cq_spec = np.dot(mag, fb.T)
+    cq_spec = np.where(cq_spec < 1e-9, 1e-9, cq_spec)
+    log_cq  = np.log(cq_spec)
+    n_keep  = min(n_bins, len(cf))
+    out     = np.zeros((len(fr), n_bins), np.float32)
+    for n in range(n_keep):
+        out[:,n] = (log_cq * np.cos(np.pi*n/len(cf)*(np.arange(len(cf))+0.5))).sum(1)
+    return out
+
+# ════════════════════════════════════════════════════════════════════════════
+#  SPECTRAL FEATURES  (9 dims)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _compute_spectral(sig, sr, fr, fl, n_fft=512):
+    win    = np.hamming(fl).astype(np.float32)
+    mag    = np.abs(np.fft.rfft(fr*win, n=n_fft))
+    power  = mag**2
+    freqs  = np.linspace(0, sr/2.0, n_fft//2+1)
+    psum   = power.sum(axis=1, keepdims=True) + 1e-12
+    pnorm  = power / psum
+
+    centroid = (pnorm * freqs[None,:]).sum(axis=1)
+    diff2    = (freqs[None,:] - centroid[:,None])**2
+    spread   = np.sqrt((pnorm*diff2).sum(axis=1))
+    diff3    = (freqs[None,:] - centroid[:,None])**3
+    skewness = (pnorm*diff3).sum(axis=1) / (spread**3 + 1e-9)
+    diff4    = (freqs[None,:] - centroid[:,None])**4
+    kurtosis = (pnorm*diff4).sum(axis=1) / (spread**4 + 1e-9)
+
+    flux = np.zeros(len(fr), np.float32)
+    if len(fr) > 1:
+        flux[1:] = np.sqrt(((mag[1:]-mag[:-1])**2).sum(axis=1))
+        flux[0]  = flux[1]
+
+    cum     = np.cumsum(power, axis=1)
+    thr     = 0.85 * cum[:,-1]
+    rolloff = np.zeros(len(fr), np.float32)
+    for i in range(len(fr)):
+        idx = np.searchsorted(cum[i], thr[i])
+        rolloff[i] = freqs[min(idx, len(freqs)-1)]
+
+    lmin = max(1, int(sr/600)); lmax = min(int(sr/60), fl-1)
+    win2 = np.hamming(fl).astype(np.float32)
+    hnr_vals = []; f0_per = []
+    for frm in fr:
+        wf = frm*win2; c = np.correlate(wf, wf, "full")[fl-1:]
+        if c[0]<1e-9 or lmax<=lmin or lmax>=len(c):
+            hnr_vals.append(0.0); f0_per.append(0.0); continue
+        pk = np.argmax(c[lmin:lmax])+lmin; r = c[pk]/c[0]
+        hnr_vals.append(float(10*np.log10(max(r,1e-9)/max(1.0-r,1e-9))))
+        f0_per.append(float(sr/pk) if r > 0.28 else 0.0)
+    hnr_spec = float(np.mean(hnr_vals))
+
+    voiced_f0  = [v for v in f0_per if v > 0]
+    rms_frames = np.sqrt(np.mean(fr**2, axis=1))
+    jitter  = (float(np.mean(np.abs(np.diff([sr/f for f in voiced_f0]))) /
+               (np.mean([sr/f for f in voiced_f0])+1e-9))
+               if len(voiced_f0) > 1 else 0.0)
+    shimmer = (float(np.mean(np.abs(np.diff(rms_frames))) /
+               (np.mean(rms_frames)+1e-9))
+               if len(rms_frames) > 1 else 0.0)
+
+    return np.array([
+        float(centroid.mean()), float(spread.mean()),
+        float(skewness.mean()), float(kurtosis.mean()),
+        float(flux.mean()),     float(rolloff.mean()),
+        hnr_spec, jitter, shimmer,
+    ], np.float32)
+
+# ════════════════════════════════════════════════════════════════════════════
+#  PROSODIC FEATURES  (8 dims)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _compute_prosodic(sig, sr, fr, fl):
+    win  = np.hamming(fl).astype(np.float32)
+    lmin = max(1, int(sr/600)); lmax = min(int(sr/60), fl-1)
+    voiced = 0; f0_vals = []
+    for frm in fr:
+        wf = frm*win; c = np.correlate(wf, wf, "full")[fl-1:]
+        if c[0]<1e-9 or lmax<=lmin or lmax>=len(c): continue
+        pk = np.argmax(c[lmin:lmax])+lmin
+        if c[pk]/c[0] > 0.28: voiced += 1; f0_vals.append(float(sr/pk))
+    voiced_ratio = float(voiced/max(len(fr), 1))
+    energy       = np.sqrt(np.mean(fr**2, axis=1))
+    energy_mean  = float(energy.mean()); energy_std = float(energy.std())
+    f0_mean  = float(np.mean(f0_vals))  if f0_vals else 0.0
+    f0_std   = float(np.std(f0_vals))   if f0_vals else 0.0
+    f0_range = float(np.ptp(f0_vals))   if f0_vals else 0.0
+    zcr      = np.mean(np.abs(np.diff(np.sign(fr), axis=1)), axis=1)/2.0
+    zcr_mean = float(zcr.mean())
+    hnr = 0.0
+    if f0_vals:
+        f0e = np.median(f0_vals); period = int(sr/f0e) if f0e > 0 else 0
+        if period > 0 and period*2 < len(sig):
+            h = np.correlate(sig[:period*2], sig[:period], "valid")
+            nv = max(np.var(sig)-(np.var(h[:period]) if len(h)>=period else 0), 1e-9)
+            hnr = float(10*np.log10(np.var(sig)/nv+1e-9))
+    return np.array([voiced_ratio,energy_mean,energy_std,
+                     f0_mean,f0_std,f0_range,zcr_mean,hnr], np.float32)
+
+# ════════════════════════════════════════════════════════════════════════════
+#  COMBINED UTTERANCE FEATURES  (305-dim)
+# ════════════════════════════════════════════════════════════════════════════
+
+def extract_utterance_features(wav_path):
+    """305-dim: MFCC(104)+PNCC(104)+CQCC(80)+Spectral(9)+Prosodic(8)"""
+    ZERO        = np.zeros(N_UTT_FEATS, np.float32)
+    actual_path = wav_path; tmp_path = None
+    if hasattr(wav_path, "read"):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        tmp.write(wav_path.read()); tmp.close()
+        actual_path = tmp.name; tmp_path = tmp.name
+        if hasattr(wav_path, "seek"): wav_path.seek(0)
+    try:
+        sig, sr = load_wav(actual_path)
+        sig     = trim_silence(sig, sr)
+        if len(sig) < sr*0.04: return ZERO
+        fr, fl, _ = _frames(sig, sr)
+        if len(fr) == 0: return ZERO
+
+        mfcc      = _compute_mfcc(sig, sr, n_mfcc=N_MFCC)
+        d_mfcc    = _delta(mfcc)
+        mfcc_feat = np.concatenate([mfcc.mean(0),mfcc.std(0),d_mfcc.mean(0),d_mfcc.std(0)])
+
+        pncc      = _compute_pncc(sig, sr, n_pncc=N_PNCC)
+        d_pncc    = _delta(pncc)
+        pncc_feat = np.concatenate([pncc.mean(0),pncc.std(0),d_pncc.mean(0),d_pncc.std(0)])
+
+        cqcc      = _compute_cqcc(sig, sr, n_bins=N_CQT_BINS)
+        d_cqcc    = _delta(cqcc)
+        cqcc_feat = np.concatenate([cqcc.mean(0),cqcc.std(0),d_cqcc.mean(0),d_cqcc.std(0)])
+
+        spec_feat = _compute_spectral(sig, sr, fr, fl)
+        pros_feat = _compute_prosodic(sig, sr, fr, fl)
+
+        feat = np.concatenate([mfcc_feat,pncc_feat,cqcc_feat,
+                               spec_feat,pros_feat]).astype(np.float32)
+        return np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+    except Exception:
+        return ZERO
+    finally:
+        if tmp_path:
+            try: os.unlink(tmp_path)
+            except: pass
+
+# ════════════════════════════════════════════════════════════════════════════
+#  SEVERITY FEATURE VECTOR  (21-dim, SAME LOGIC AS TRAINING)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _task_psli_to_21d(task_psli):
     """
-    Autocorrelation-based F0 estimation.
-    Returns: [f0_mean, f0_std, f0_min, f0_max, voiced_ratio]
+    Convert per-task p(SLI) dict → 21-dim feature vector.
+    MUST match the _psli_to_21d() function in train_sli_model.py exactly.
     """
-    frame_len  = int(sr * frame_ms  / 1000)
-    frame_step = int(sr * step_ms   / 1000)
-    num_frames = max(1, 1 + (len(signal) - frame_len) // frame_step)
+    def gv(tasks):
+        return [task_psli[t] for t in tasks if task_psli.get(t) is not None]
 
-    f0_values = []
-    for i in range(num_frames):
-        frame = signal[i * frame_step: i * frame_step + frame_len]
-        if len(frame) < frame_len:
-            break
-        # autocorrelation
-        corr = np.correlate(frame, frame, mode='full')
-        corr = corr[len(corr) // 2:]
+    tv    = [task_psli.get(t) or 0.0 for t in TASK_ORDER]  # 7
+    ev, mv, hv = gv(EASY_TASKS), gv(MEDIUM_TASKS), gv(HARD_TASKS)
+    all_v = [v for v in tv if v > 0]
 
-        lag_min = int(sr / f0_max)
-        lag_max = int(sr / f0_min)
-        lag_max = min(lag_max, len(corr) - 1)
+    sm = lambda v: float(np.mean(v)) if v else 0.0
+    ss = lambda v: float(np.std(v))  if len(v) > 1 else 0.0
+    sr = lambda v: float(np.ptp(v))  if len(v) > 1 else 0.0
+    ca = lambda v: float(sum(x >= 0.5 for x in v))
 
-        if lag_max <= lag_min:
-            continue
-
-        peak_idx = np.argmax(corr[lag_min:lag_max]) + lag_min
-        if corr[peak_idx] / (corr[0] + 1e-9) > 0.3:   # voiced threshold
-            f0_values.append(sr / peak_idx)
-
-    if not f0_values:
-        return [0.0, 0.0, 0.0, 0.0, 0.0]
-
-    f0 = np.array(f0_values)
-    voiced_ratio = len(f0_values) / num_frames
-    return [f0.mean(), f0.std(), f0.min(), f0.max(), voiced_ratio]
-
-
-def extract_jitter_shimmer(signal, sr):
-    """
-    Simplified jitter (period variability) and shimmer (amplitude variability).
-    Returns [jitter_pct, shimmer_pct]
-    """
-    frame_len  = int(sr * 0.04)
-    frame_step = int(sr * 0.01)
-    num_frames = max(1, 1 + (len(signal) - frame_len) // frame_step)
-
-    periods, amps = [], []
-    for i in range(num_frames):
-        frame = signal[i * frame_step: i * frame_step + frame_len]
-        if len(frame) < frame_len:
-            break
-        corr = np.correlate(frame, frame, mode='full')
-        corr = corr[len(corr) // 2:]
-        lag_min, lag_max = int(sr / 500), int(sr / 60)
-        lag_max = min(lag_max, len(corr) - 1)
-        if lag_max <= lag_min:
-            continue
-        peak_idx = np.argmax(corr[lag_min:lag_max]) + lag_min
-        if corr[peak_idx] / (corr[0] + 1e-9) > 0.3:
-            periods.append(peak_idx / sr)
-            amps.append(np.max(np.abs(frame)))
-
-    if len(periods) < 2:
-        return [0.0, 0.0]
-
-    periods = np.array(periods)
-    amps    = np.array(amps)
-    jitter  = np.mean(np.abs(np.diff(periods))) / (np.mean(periods) + 1e-9) * 100
-    shimmer = np.mean(np.abs(np.diff(amps)))    / (np.mean(amps)    + 1e-9) * 100
-    return [min(jitter, 100.0), min(shimmer, 100.0)]
-
-
-def extract_spectral_features(signal, sr, n_fft=512):
-    """
-    Returns [spectral_centroid, spectral_bandwidth, spectral_rolloff,
-             spectral_flatness, zcr_mean, zcr_std, rms_mean, rms_std]
-    """
-    frames, frame_len, _ = _framing(signal, sr)
-    mag = np.abs(np.fft.rfft(frames, n=n_fft))
-    freqs = np.fft.rfftfreq(n_fft, d=1.0/sr)
-    power = mag ** 2
-
-    # centroid
-    centroid = np.sum(freqs * power, axis=1) / (np.sum(power, axis=1) + 1e-9)
-
-    # bandwidth
-    bandwidth = np.sqrt(
-        np.sum(((freqs - centroid[:, None]) ** 2) * power, axis=1) /
-        (np.sum(power, axis=1) + 1e-9)
+    feat = (
+        tv +
+        [sm(ev), sm(mv), sm(hv), sm(all_v)] +
+        [ss(ev), ss(mv), ss(hv)] +
+        [ca(ev), ca(mv), ca(hv)] +
+        [sr(ev), sr(mv), sr(hv), ss(all_v)]
     )
+    return np.array(feat, np.float32)
 
-    # rolloff (85%)
-    cumpower = np.cumsum(power, axis=1)
-    total    = cumpower[:, -1:] + 1e-9
-    rolloff_idx = np.argmax(cumpower / total >= 0.85, axis=1)
-    rolloff  = freqs[rolloff_idx]
+# ════════════════════════════════════════════════════════════════════════════
+#  INFERENCE UTILITIES
+# ════════════════════════════════════════════════════════════════════════════
 
-    # flatness
-    geom_mean = np.exp(np.mean(np.log(power + 1e-9), axis=1))
-    arith_mean = np.mean(power, axis=1) + 1e-9
-    flatness  = geom_mean / arith_mean
+def _model_ready():
+    return os.path.exists(SLI_MODEL_PATH) and os.path.exists(SLI_SCALER_PATH)
 
-    # ZCR
-    zcr = np.mean(np.abs(np.diff(np.sign(frames), axis=1)), axis=1) / 2
-    rms = np.sqrt(np.mean(frames ** 2, axis=1))
-
-    return [
-        centroid.mean(), bandwidth.mean(), rolloff.mean(), flatness.mean(),
-        zcr.mean(), zcr.std(), rms.mean(), rms.std()
-    ]
+def _severity_model_ready():
+    return os.path.exists(SLI_SEV_MODEL_PATH) and os.path.exists(SLI_SEV_SCALER_PATH)
 
 
-def extract_formant_proxies(signal, sr, n_formants=3):
+def classify_utterances(wav_paths):
+    """Return list of p(SLI) for each WAV."""
+    if not _model_ready(): return []
+    try:
+        clf     = joblib.load(SLI_MODEL_PATH)
+        scl     = joblib.load(SLI_SCALER_PATH)
+        meta    = json.load(open(SLI_META_PATH))
+        classes = meta.get("binary_classes", ["healthy","sli"])
+        sli_idx = classes.index("sli") if "sli" in classes else 1
+        results = []
+        for wp in wav_paths:
+            feat = extract_utterance_features(wp)
+            if feat.sum() == 0: continue
+            Xs   = scl.transform(feat.reshape(1,-1))
+            prob = clf.predict_proba(Xs)[0]
+            results.append(float(prob[sli_idx]))
+        return results
+    except Exception: return []
+
+
+def _collect_task_wavs(speaker_dir, task_key):
+    try:
+        kc = task_key.upper().replace("_","")
+        for entry in sorted(os.listdir(speaker_dir)):
+            if os.path.isdir(os.path.join(speaker_dir,entry)):
+                cl = entry.upper().replace("_","").replace(" ","")
+                if kc in cl:
+                    tp = os.path.join(speaker_dir,entry)
+                    return sorted(os.path.join(tp,f) for f in os.listdir(tp)
+                                  if f.lower().endswith(".wav"))
+    except Exception: pass
+    return []
+
+
+def compute_task_psli(task_wav_map):
+    """Mean p(SLI) per task."""
+    task_psli = {}
+    for task in TASK_ORDER:
+        wavs = task_wav_map.get(task, [])
+        if not wavs: task_psli[task] = None; continue
+        probs = classify_utterances(wavs)
+        task_psli[task] = float(np.mean(probs)) if probs else None
+    return task_psli
+
+
+def determine_severity_rule(task_psli, threshold=BINARY_SLI_THRESHOLD):
+    """Rule-based severity (used as fallback if trained severity model absent)."""
+    def gm(tasks):
+        v = [task_psli.get(t) for t in tasks if task_psli.get(t) is not None]
+        return float(np.mean(v)) if v else None
+    ep = gm(EASY_TASKS); mp = gm(MEDIUM_TASKS); hp = gm(HARD_TASKS)
+    ap = [task_psli.get(t) for t in TASK_ORDER if task_psli.get(t) is not None]
+    ov = float(np.mean(ap)) if ap else 0.0
+    if ep is not None and ep >= threshold: return "severe",   ov
+    if mp is not None and mp >= threshold: return "moderate", ov
+    if hp is not None and hp >= threshold: return "mild",     ov
+    return "healthy", ov
+
+determine_severity = determine_severity_rule   # compat alias
+
+
+def get_task_quality_scores_from_wavs(task_wav_map):
+    tp = compute_task_psli(task_wav_map)
+    return {t: ((1.0-p) if p is not None else None) for t,p in tp.items()}
+
+def get_task_quality_scores(sv): return {t: None for t in TASK_ORDER}
+def build_speaker_vector(sd):    return np.zeros(N_UTT_FEATS, np.float32)
+def build_speaker_vector_from_uploaded(tm): return np.zeros(N_UTT_FEATS, np.float32)
+
+# Legacy compat: old severity feature builder (no longer used for model calls)
+def build_severity_feature_vector(task_wav_map):
+    tp = compute_task_psli(task_wav_map)
+    return _task_psli_to_21d(tp)
+
+# ════════════════════════════════════════════════════════════════════════════
+#  MAIN INFERENCE
+# ════════════════════════════════════════════════════════════════════════════
+
+def predict_from_task_map(task_wav_map):
     """
-    LPC-based formant estimation (proxy — not as precise as PRAAT/FORANA
-    but captures the same envelope peaks).
-    Returns flattened [F1_mean, F1_std, F2_mean, F2_std, F3_mean, F3_std].
+    Full inference:
+      1. Binary model → healthy / SLI
+      2. If SLI → severity model (21-dim p(SLI) profile) → mild/moderate/severe
     """
-    frames, frame_len, _ = _framing(signal, sr)
-    lpc_order = 2 + sr // 1000   # rule of thumb
+    if not _model_ready(): return _no_model_result()
 
-    all_formants = []
-    for frame in frames:
-        # LPC via autocorrelation (Levinson-Durbin)
-        try:
-            r = np.correlate(frame, frame, mode='full')
-            r = r[len(r)//2: len(r)//2 + lpc_order + 1]
-            R = np.array([[r[abs(i-j)] for j in range(lpc_order)]
-                          for i in range(lpc_order)])
-            if np.linalg.matrix_rank(R) < lpc_order:
-                continue
-            a = np.linalg.solve(R, -r[1:lpc_order+1])
-            a = np.concatenate([[1], a])
+    path_map = {}; tmps = []
+    for task, files in task_wav_map.items():
+        paths = []
+        for f in files:
+            if hasattr(f, "read"):
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                tmp.write(f.read()); tmp.close()
+                paths.append(tmp.name); tmps.append(tmp.name)
+                if hasattr(f,"seek"): f.seek(0)
+            else: paths.append(str(f))
+        path_map[task] = paths
 
-            # roots of LPC polynomial → formants
-            roots = np.roots(a)
-            roots = roots[np.imag(roots) > 0]   # upper half-plane
-            angles = np.arctan2(np.imag(roots), np.real(roots))
-            freqs_hz = angles * sr / (2 * np.pi)
-            freqs_hz = np.sort(freqs_hz[freqs_hz > 90])
-            if len(freqs_hz) >= n_formants:
-                all_formants.append(freqs_hz[:n_formants])
-        except Exception:
-            continue
+    task_psli                    = compute_task_psli(path_map)
+    severity_rule, overall_psli  = determine_severity_rule(task_psli)
+    task_scores                  = {t:((1.0-p) if p is not None else None)
+                                    for t,p in task_psli.items()}
+    label                        = "Healthy" if severity_rule == "healthy" else "SLI"
+    binary_probs                 = {"healthy": 1.0-overall_psli, "sli": overall_psli}
 
-    if not all_formants:
-        return [0.0] * (n_formants * 2)
+    if label == "SLI":
+        if _severity_model_ready():
+            try:
+                sev_clf  = joblib.load(SLI_SEV_MODEL_PATH)
+                sev_scl  = joblib.load(SLI_SEV_SCALER_PATH)
+                meta     = json.load(open(SLI_META_PATH))
+                sev_cls  = meta.get("severity_classes", ["mild","moderate","severe"])
 
-    arr = np.array(all_formants)   # (frames, n_formants)
-    result = []
-    for k in range(n_formants):
-        result += [arr[:, k].mean(), arr[:, k].std()]
-    return result
-
-
-def extract_all_features(wav_path: str) -> np.ndarray:
-    """
-    Master feature extraction. Returns a 1-D float32 numpy array.
-    Feature vector layout:
-        mfcc        26
-        pitch        5
-        jitter_sh    2
-        spectral     8
-        formants     6
-        ─────────────
-        TOTAL       47
-    """
-    signal, sr = load_wav(wav_path)
-    signal = trim_silence(signal)
-
-    if len(signal) < sr * 0.1:   # shorter than 100 ms — skip
-        return np.zeros(47, dtype=np.float32)
-
-    mfcc     = extract_mfcc(signal, sr)
-    pitch    = extract_pitch_features(signal, sr)
-    jitter   = extract_jitter_shimmer(signal, sr)
-    spectral = extract_spectral_features(signal, sr)
-    formants = extract_formant_proxies(signal, sr)
-
-    features = np.concatenate([mfcc, pitch, jitter, spectral, formants])
-    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
-    return features.astype(np.float32)
-
-
-FEATURE_NAMES = (
-    [f"MFCC_{i}_mean" for i in range(13)] +
-    [f"MFCC_{i}_std"  for i in range(13)] +
-    ["F0_mean", "F0_std", "F0_min", "F0_max", "Voiced_ratio"] +
-    ["Jitter_%", "Shimmer_%"] +
-    ["Spectral_centroid", "Spectral_bandwidth", "Spectral_rolloff",
-     "Spectral_flatness", "ZCR_mean", "ZCR_std", "RMS_mean", "RMS_std"] +
-    ["F1_mean", "F1_std", "F2_mean", "F2_std", "F3_mean", "F3_std"]
-)
-
-
-# ═════════════════════════════════════════════
-#  3.  CLASSIFIER INFERENCE
-# ═════════════════════════════════════════════
-
-def load_sli_model():
-    if not os.path.exists(SLI_MODEL_PATH):
-        raise FileNotFoundError(
-            f"SLI model not found at {SLI_MODEL_PATH}. "
-            "Please run train_sli_model.py first."
-        )
-    clf    = joblib.load(SLI_MODEL_PATH)
-    scaler = joblib.load(SLI_SCALER_PATH)
-    with open(SLI_META_PATH) as f:
-        meta = json.load(f)
-    return clf, scaler, meta
-
-
-def predict_sli(wav_path: str):
-    """
-    Run full inference on one WAV file.
-    Returns dict:
-        label       : "Healthy" | "SLI"
-        severity    : None | "Mild" | "Moderate" | "Severe"
-        confidence  : float  [0, 1]
-        probabilities: dict  {class_name: prob}
-        features    : np.ndarray
-    """
-    clf, scaler, meta = load_sli_model()
-    features = extract_all_features(wav_path)
-    X = scaler.transform(features.reshape(1, -1))
-
-    classes    = meta["classes"]          # e.g. ["healthy","sli_mild",...]
-    probs      = clf.predict_proba(X)[0]
-    pred_idx   = int(np.argmax(probs))
-    pred_class = classes[pred_idx]
-    confidence = float(probs[pred_idx])
-
-    prob_dict  = {c: float(p) for c, p in zip(classes, probs)}
-
-    if pred_class == "healthy":
-        label, severity = "Healthy", None
-    elif "mild" in pred_class:
-        label, severity = "SLI", "Mild"
-    elif "moderate" in pred_class:
-        label, severity = "SLI", "Moderate"
-    elif "severe" in pred_class:
-        label, severity = "SLI", "Severe"
+                # Build the SAME 21-dim p(SLI) profile used during training
+                feat_sv  = _task_psli_to_21d(task_psli).reshape(1, -1)
+                Xs_sv    = sev_scl.transform(feat_sv)
+                sprob    = sev_clf.predict_proba(Xs_sv)[0]
+                sev_probs = {c: float(p) for c,p in zip(sev_cls, sprob)}
+                sev_label = sev_cls[int(np.argmax(sprob))].capitalize()
+            except Exception:
+                sev_label = severity_rule.capitalize()
+                sev_probs = {c:(1.0 if c==severity_rule else 0.0)
+                             for c in ["mild","moderate","severe"]}
+        else:
+            sev_label = severity_rule.capitalize()
+            sev_probs = {c:(1.0 if c==severity_rule else 0.0)
+                         for c in ["mild","moderate","severe"]}
     else:
-        label, severity = "SLI", "Unknown"
+        sev_label = None; sev_probs = None
 
+    for tmp in tmps:
+        try: os.unlink(tmp)
+        except: pass
+
+    profile = _build_profile(label, sev_label, overall_psli, task_scores, task_psli)
     return {
-        "label":         label,
-        "severity":      severity,
-        "confidence":    confidence,
-        "probabilities": prob_dict,
-        "features":      features,
+        "label":          label,
+        "severity":       sev_label,
+        "disorder_score": overall_psli,
+        "confidence":     overall_psli if label == "SLI" else 1.0-overall_psli,
+        "binary_probs":   binary_probs,
+        "severity_probs": sev_probs,
+        "task_scores":    task_scores,
+        "task_psli":      task_psli,
+        "features":       np.zeros(N_UTT_FEATS, np.float32),
+        "profile":        profile,
     }
 
 
-# ═════════════════════════════════════════════
-#  4.  TRANSCRIPTION  (Whisper – optional)
-# ═════════════════════════════════════════════
+def _no_model_result():
+    ts = {t: None for t in TASK_ORDER}
+    return {"label":"No model","severity":None,"disorder_score":0.0,"confidence":0.0,
+            "binary_probs":{"healthy":0.0,"sli":0.0},"severity_probs":None,
+            "task_scores":ts,"features":np.zeros(N_UTT_FEATS),
+            "profile":"No model trained. Run: python train_sli_model.py"}
 
-def transcribe_audio(wav_path: str, language: str = "cs") -> str:
-    """
-    Transcribe WAV using OpenAI Whisper.
-    Falls back to a helpful message if Whisper is not installed.
-    language='cs' for Czech (LANNA database).  Change to 'en' if needed.
-    """
+def predict_single_wav(wav_path, assumed_task="VSL"):
+    return predict_from_task_map({assumed_task: [wav_path]})
+
+def predict_from_speaker_dir(speaker_dir):
+    pm = {t: _collect_task_wavs(speaker_dir, t) for t in TASK_ORDER}
+    return predict_from_task_map(pm)
+
+# ════════════════════════════════════════════════════════════════════════════
+#  CLINICAL PROFILE
+# ════════════════════════════════════════════════════════════════════════════
+
+def _build_profile(label, severity, disorder_score, task_scores, task_psli):
+    lines = []
+    if label == "No model":
+        lines.append("No trained model. Run: python train_sli_model.py")
+        return "\n".join(lines)
+    if label == "Healthy":
+        lines.append(
+            f"Speech is within typical development across all task levels. "
+            f"Utterance-level SLI probability is low (mean: {disorder_score*100:.0f}%). "
+            "Articulation is consistent from consonants through sentences.")
+    else:
+        descs = {
+            "Mild":
+                f"Mild SLI detected (mean SLI probability: {disorder_score*100:.0f}%). "
+                "Vowels, consonants, syllables and simple words are produced adequately. "
+                "Difficulty appears at the level of 3–4 syllable words and sentences.",
+            "Moderate":
+                f"Moderate SLI detected (mean SLI probability: {disorder_score*100:.0f}%). "
+                "Vowel and consonant production is adequate. "
+                "Difficulty begins from syllable/2-syllable word level onwards.",
+            "Severe":
+                f"Severe SLI detected (mean SLI probability: {disorder_score*100:.0f}%). "
+                "Even basic vowel and consonant production shows SLI patterns. "
+                "All task levels are affected.",
+        }
+        lines.append(descs.get(severity or "",
+                     f"SLI detected (probability: {disorder_score*100:.0f}%)."))
+
+    lines.append("\nPer-task SLI probability (higher = more SLI-like):")
+    for task in TASK_ORDER:
+        p  = task_psli.get(task); tl = TASK_LABELS.get(task, task)
+        if p is None: lines.append(f"  — {tl:<24}[not tested]"); continue
+        bar  = "█"*int(p*10) + "░"*(10-int(p*10))
+        flag = "✓" if p < 0.40 else ("△" if p < 0.60 else "✗")
+        lines.append(f"  {flag} {tl:<24}[{bar}] p(SLI)={p*100:.0f}%")
+
+    ap = [task_psli[t] for t in TASK_ORDER if task_psli.get(t) is not None]
+    if len(ap) >= 3:
+        ep = np.mean([task_psli[t] for t in EASY_TASKS   if task_psli.get(t) is not None] or [0])
+        mp = np.mean([task_psli[t] for t in MEDIUM_TASKS if task_psli.get(t) is not None] or [0])
+        hp = np.mean([task_psli[t] for t in HARD_TASKS   if task_psli.get(t) is not None] or [0])
+        lines.append(f"\nComplexity breakdown:")
+        lines.append(f"  Easy   (vowels/consonants):     p(SLI)={ep*100:.0f}%")
+        lines.append(f"  Medium (syllables/2-syl words): p(SLI)={mp*100:.0f}%")
+        lines.append(f"  Hard   (3-4 syl/sentences):     p(SLI)={hp*100:.0f}%")
+
+    if label == "SLI":
+        sev = (severity or "").lower()
+        lines.append("\nRecommended therapy focus:")
+        if sev == "severe":
+            lines.append("  1. Basic phoneme production (m,b,p,t,d,k,a,o,u)")
+            lines.append("  2. Auditory discrimination training")
+            lines.append("  3. Phonological awareness at segmental level")
+        elif sev == "moderate":
+            lines.append("  1. CV syllable repetition (pa,ta,ka,ba,da,ga)")
+            lines.append("  2. Minimal pair exercises (bat/pat, cap/cup)")
+            lines.append("  3. 2-syllable word production and prosody")
+        elif sev == "mild":
+            lines.append("  1. 3-4 syllable word articulation and stress patterns")
+            lines.append("  2. Sentence prosody and rhythm")
+            lines.append("  3. Connected speech and narrative practice")
+
+    lines.append("\n[DISCLAIMER: Automated screening — review by speech-language therapist required]")
+    return "\n".join(lines)
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TRANSCRIPTION & REPORT
+# ════════════════════════════════════════════════════════════════════════════
+
+def transcribe_audio(wav_path, language="cs"):
     try:
-        import whisper as _whisper
-        model = _whisper.load_model("base")
-        result = model.transcribe(wav_path, language=language)
-        return result["text"].strip()
-    except ImportError:
-        return (
-            "[Whisper not installed. "
-            "Run:  pip install openai-whisper  to enable transcription.]"
-        )
-    except Exception as e:
-        return f"[Transcription failed: {e}]"
+        import whisper as _w
+        model  = _w.load_model("base")
+        kwargs = {} if language == "auto" else {"language": language}
+        return model.transcribe(str(wav_path), **kwargs)["text"].strip()
+    except ImportError: return "[Whisper not installed]"
+    except Exception as e: return f"[Transcription error: {e}]"
 
 
-# ═════════════════════════════════════════════
-#  5.  VISUALISATIONS  (return matplotlib figs)
-# ═════════════════════════════════════════════
+def build_audio_findings_text(source_name, result, transcription=""):
+    label   = result["label"]; severity = result.get("severity") or "N/A"
+    score   = result["disorder_score"]*100
+    bp      = result.get("binary_probs",{}); sp = result.get("severity_probs") or {}
+    ts      = result.get("task_scores",{}); profile = result.get("profile","")
+    bp_str  = "\n".join(f"  {k.capitalize()}: {v*100:.1f}%" for k,v in bp.items())
+    sp_str  = "\n".join(f"  {k.capitalize()}: {v*100:.1f}%" for k,v in sp.items()) if sp else "  N/A"
+    ts_lines = [
+        f"  {TASK_LABELS.get(t,t):<24}: "
+        f"{'not tested' if ts.get(t) is None else f'p(healthy)={ts[t]*100:.0f}%'}"
+        for t in TASK_ORDER
+    ]
+    return (f"SLI SPEECH ANALYSIS REPORT\n===========================\n"
+            f"Source: {source_name}\nDiagnosis: {label}\nSeverity: {severity}\n"
+            f"SLI Probability: {score:.1f}%\n\nClassification:\n{bp_str}\n"
+            f"Severity:\n{sp_str}\n\nTask results:\n{chr(10).join(ts_lines)}\n\n"
+            f"Clinical Profile:\n{profile}\nTranscription:\n"
+            f"{transcription or '[Not requested]'}\n\n"
+            f"DISCLAIMER: Automated ML screening. Must be reviewed by therapist.\n")
 
-def plot_waveform(signal: np.ndarray, sr: int, title: str = "Waveform"):
-    fig, ax = plt.subplots(figsize=(8, 2))
-    t = np.linspace(0, len(signal) / sr, len(signal))
-    ax.plot(t, signal, color="#2563eb", linewidth=0.5, alpha=0.8)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Amplitude")
-    ax.set_title(title)
-    ax.set_facecolor("#f8fafc")
-    fig.tight_layout()
-    return fig
+# ════════════════════════════════════════════════════════════════════════════
+#  VISUALISATIONS
+# ════════════════════════════════════════════════════════════════════════════
 
+def plot_waveform(sig, sr, title="Waveform"):
+    fig,ax=plt.subplots(figsize=(9,2))
+    ax.plot(np.linspace(0,len(sig)/sr,len(sig)),sig,color="#2563eb",lw=0.5,alpha=0.8)
+    ax.set_xlabel("Time (s)"); ax.set_ylabel("Amplitude"); ax.set_title(title)
+    ax.set_facecolor("#f8fafc"); fig.tight_layout(); return fig
 
-def plot_spectrogram(signal: np.ndarray, sr: int, title: str = "Spectrogram"):
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.specgram(signal, Fs=sr, cmap="viridis", NFFT=512, noverlap=256)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Frequency (Hz)")
-    ax.set_title(title)
-    fig.tight_layout()
-    return fig
+def plot_spectrogram(sig, sr, title="Spectrogram"):
+    fig,ax=plt.subplots(figsize=(9,3))
+    ax.specgram(sig,Fs=sr,cmap="viridis",NFFT=512,noverlap=384)
+    ax.set_xlabel("Time (s)"); ax.set_ylabel("Freq (Hz)"); ax.set_title(title)
+    fig.tight_layout(); return fig
 
+def plot_mfcc(sig, sr):
+    mfcc=_compute_mfcc(sig,sr,n_mfcc=13)
+    fig,ax=plt.subplots(figsize=(9,3))
+    im=ax.imshow(mfcc.T,aspect="auto",origin="lower",cmap="magma")
+    ax.set_xlabel("Frame"); ax.set_ylabel("MFCC"); ax.set_title("MFCCs")
+    fig.colorbar(im,ax=ax); fig.tight_layout(); return fig
 
-def plot_mfcc(signal: np.ndarray, sr: int, n_mfcc: int = 13):
-    signal_pe = _preemphasis(signal)
-    frames, _, _ = _framing(signal_pe, sr)
-    n_fft, n_mels = 512, 26
-    mag = np.abs(np.fft.rfft(frames, n=n_fft)) ** 2
+def plot_task_quality(task_scores, label="", severity=""):
+    scores=[task_scores.get(t) for t in TASK_ORDER]
+    labels_=[TASK_LABELS.get(t,t) for t in TASK_ORDER]
+    values=[s if s is not None else 0.0 for s in scores]; absent=[s is None for s in scores]
+    colors=[]
+    for s,ab in zip(scores,absent):
+        if ab:          colors.append("#e2e8f0")
+        elif s>=0.65:   colors.append("#16a34a")
+        elif s>=0.50:   colors.append("#84cc16")
+        elif s>=0.35:   colors.append("#f59e0b")
+        else:           colors.append("#ef4444")
+    fig,ax=plt.subplots(figsize=(8,4.5))
+    bars=ax.barh(labels_,values,color=colors,edgecolor="white",height=0.6)
+    ax.set_xlim(0,1.15)
+    ax.axvline(0.50,color="#f97316",ls="--",lw=2.0,alpha=0.9,label="Decision boundary")
+    ax.axvline(0.65,color="#16a34a",ls="--",lw=1.2,alpha=0.7,label="Clearly healthy")
+    for bar,s,ab in zip(bars,scores,absent):
+        txt="—" if ab else f"{(1-s)*100:.0f}%SLI"
+        ax.text(bar.get_width()+0.01,bar.get_y()+bar.get_height()/2,txt,va="center",fontsize=8)
+    title="Per-Task SLI Classification  (bar = p(healthy))"
+    if label: title+=f"  →  {label}"+(f" ({severity})" if severity else "")
+    ax.set_title(title,fontweight="bold"); ax.set_xlabel("p(healthy)")
+    ax.legend(fontsize=8,loc="lower right"); ax.invert_yaxis()
+    fig.tight_layout(); return fig
 
-    fmin, fmax = 0, sr / 2
-    mel_min = 2595 * np.log10(1 + fmin / 700)
-    mel_max = 2595 * np.log10(1 + fmax / 700)
-    mel_pts = np.linspace(mel_min, mel_max, n_mels + 2)
-    hz_pts  = 700 * (10 ** (mel_pts / 2595) - 1)
-    bins    = np.floor((n_fft + 1) * hz_pts / sr).astype(int)
+def plot_complexity_profile(task_scores):
+    present=[(t,task_scores[t]) for t in TASK_ORDER if task_scores.get(t) is not None]
+    if len(present)<2: return None
+    xs=list(range(len(present))); ys=[s for _,s in present]
+    tlbls=[TASK_LABELS.get(t,t) for t,_ in present]
+    colors=["#16a34a" if s>=0.65 else "#f59e0b" if s>=0.50 else "#ef4444" for s in ys]
+    fig,ax=plt.subplots(figsize=(9,3.5))
+    ax.fill_between(xs,ys,alpha=0.15,color="#3b82f6")
+    ax.plot(xs,ys,"o-",color="#3b82f6",lw=2,ms=8,zorder=5)
+    for x,y,c in zip(xs,ys,colors): ax.plot(x,y,"o",color=c,ms=10,zorder=6)
+    ax.axhline(0.50,color="#f97316",ls="--",lw=2.0,alpha=0.9,label="Decision threshold")
+    ax.set_xticks(xs); ax.set_xticklabels(tlbls,rotation=15,ha="right")
+    ax.set_ylim(0,1.05); ax.set_ylabel("p(healthy)")
+    ax.set_title("Task-Level Healthy Probability Across Complexity",fontweight="bold")
+    ax.legend(fontsize=9); fig.tight_layout(); return fig
 
-    fbank = np.zeros((n_mels, n_fft // 2 + 1))
-    for m in range(1, n_mels + 1):
-        f_m_minus, f_m, f_m_plus = bins[m-1], bins[m], bins[m+1]
-        for k in range(f_m_minus, f_m):
-            if f_m != f_m_minus:
-                fbank[m-1, k] = (k - f_m_minus) / (f_m - f_m_minus)
-        for k in range(f_m, f_m_plus):
-            if f_m_plus != f_m:
-                fbank[m-1, k] = (f_m_plus - k) / (f_m_plus - f_m)
+def plot_disorder_gauge(disorder_score, label, severity):
+    fig,ax=plt.subplots(figsize=(8,2.2))
+    zones=[(0,0.25,"#16a34a","Healthy"),(0.25,0.50,"#eab308","Mild"),
+           (0.50,0.75,"#f97316","Moderate"),(0.75,1.00,"#dc2626","Severe")]
+    for lo,hi,color,zlabel in zones:
+        ax.barh(0,hi-lo,left=lo,height=0.35,color=color,alpha=0.30)
+        ax.text((lo+hi)/2,-0.28,zlabel,ha="center",fontsize=8,color=color,fontweight="bold")
+    ax.axvline(disorder_score,color="#1e293b",lw=3,zorder=5)
+    ax.plot(disorder_score,0,marker="v",color="#1e293b",ms=14,zorder=6)
+    sev_str=f" ({severity})" if severity else ""
+    ax.set_title(f"Mean SLI Probability: {disorder_score*100:.0f}%  →  {label}{sev_str}",
+                 fontweight="bold",fontsize=12)
+    ax.set_xlim(0,1); ax.set_ylim(-0.45,0.45)
+    ax.set_xlabel("← Healthy (0%)       Mild       Moderate       Severe (100%) →")
+    ax.get_yaxis().set_visible(False); fig.tight_layout(); return fig
 
-    fb = np.dot(mag, fbank.T)
-    fb = np.where(fb == 0, np.finfo(float).eps, fb)
-    fb = 20 * np.log10(fb)
+def plot_binary_donut(binary_probs):
+    vals=[binary_probs.get("healthy",0),binary_probs.get("sli",0)]
+    fig,ax=plt.subplots(figsize=(4,4))
+    _,_,at=ax.pie(vals,labels=["Healthy","SLI"],colors=["#16a34a","#ef4444"],
+                  autopct="%1.1f%%",startangle=90,wedgeprops=dict(width=0.55))
+    for a in at: a.set_fontsize(11)
+    ax.set_title("Overall SLI Probability"); fig.tight_layout(); return fig
 
-    mfcc = np.zeros((len(frames), n_mfcc))
-    for n in range(n_mfcc):
-        mfcc[:, n] = np.sum(
-            fb * np.cos(np.pi * n / n_mels * (np.arange(n_mels) + 0.5)),
-            axis=1
-        )
-
-    fig, ax = plt.subplots(figsize=(8, 3))
-    img = ax.imshow(mfcc.T, aspect="auto", origin="lower",
-                    cmap="magma", interpolation="nearest")
-    ax.set_xlabel("Frame")
-    ax.set_ylabel("MFCC Coefficient")
-    ax.set_title("MFCCs")
-    fig.colorbar(img, ax=ax, label="dB")
-    fig.tight_layout()
-    return fig
-
-
-def plot_feature_radar(features: np.ndarray):
-    """
-    Radar chart of the 8 most interpretable per-file features.
-    Values are normalised to [0,1] for display.
-    """
-    labels = ["F0 Mean", "F0 Std", "Voiced\nRatio", "Jitter",
-              "Shimmer", "Spectral\nCentroid", "ZCR", "RMS"]
-
-    mfcc_len  = 26
-    pitch_off = mfcc_len
-    jitter_off = pitch_off + 5
-    spec_off   = jitter_off + 2
-
-    vals = np.array([
-        features[pitch_off],          # F0 mean
-        features[pitch_off + 1],      # F0 std
-        features[pitch_off + 4],      # voiced ratio
-        features[jitter_off],         # jitter
-        features[jitter_off + 1],     # shimmer
-        features[spec_off],           # spectral centroid
-        features[spec_off + 4],       # ZCR mean
-        features[spec_off + 6],       # RMS mean
-    ])
-
-    # normalise to [0,1] using typical ranges
-    ranges = np.array([500, 200, 1, 10, 30, 4000, 0.5, 0.3])
-    vals = np.clip(vals / (ranges + 1e-9), 0, 1)
-
-    N   = len(labels)
-    angles = [n / float(N) * 2 * np.pi for n in range(N)]
-    angles += angles[:1]
-    vals_plot = list(vals) + [vals[0]]
-
-    fig, ax = plt.subplots(figsize=(4, 4), subplot_kw=dict(polar=True))
-    ax.plot(angles, vals_plot, color="#2563eb", linewidth=2)
-    ax.fill(angles, vals_plot, color="#2563eb", alpha=0.25)
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, size=8)
-    ax.set_yticks([0.25, 0.5, 0.75, 1.0])
-    ax.set_yticklabels(["25%", "50%", "75%", "100%"], size=6)
-    ax.set_title("Feature Radar", pad=14)
-    fig.tight_layout()
-    return fig
-
-
-def plot_probability_bar(probabilities: dict):
-    """Horizontal bar chart of class probabilities."""
-    classes = list(probabilities.keys())
-    probs   = [probabilities[c] for c in classes]
-    colors  = ["#16a34a" if c == "healthy" else
-               "#f59e0b" if "mild" in c else
-               "#ef4444" if "moderate" in c else
-               "#7c3aed" for c in classes]
-
-    fig, ax = plt.subplots(figsize=(6, max(2, len(classes) * 0.7)))
-    bars = ax.barh(classes, probs, color=colors, edgecolor="white")
-    ax.set_xlim(0, 1)
-    ax.set_xlabel("Probability")
-    ax.set_title("SLI Classification Probabilities")
-    for bar, p in zip(bars, probs):
-        ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height() / 2,
-                f"{p:.1%}", va="center", fontsize=9)
-    fig.tight_layout()
-    return fig
-
-
-# ═════════════════════════════════════════════
-#  6.  BUILD FINDINGS TEXT  (for RAG indexing)
-# ═════════════════════════════════════════════
-
-def build_audio_findings_text(wav_path: str, prediction: dict,
-                               transcription: str) -> str:
-    fname    = os.path.basename(wav_path)
-    label    = prediction["label"]
-    severity = prediction["severity"] or "N/A"
-    conf     = prediction["confidence"] * 100
-    probs    = prediction["probabilities"]
-    features = prediction["features"]
-
-    prob_lines = "\n".join(
-        f"  {cls}: {p*100:.1f}%" for cls, p in probs.items()
-    )
-
-    feat_summary = (
-        f"  F0 mean        : {features[26]:.1f} Hz\n"
-        f"  F0 std         : {features[27]:.1f} Hz\n"
-        f"  Voiced ratio   : {features[30]:.2f}\n"
-        f"  Jitter         : {features[31]:.2f}%\n"
-        f"  Shimmer        : {features[32]:.2f}%\n"
-        f"  Spectral centrd: {features[33]:.1f} Hz\n"
-        f"  ZCR mean       : {features[37]:.4f}\n"
-        f"  RMS mean       : {features[39]:.4f}\n"
-        f"  F1 mean        : {features[41]:.1f} Hz\n"
-        f"  F2 mean        : {features[43]:.1f} Hz\n"
-        f"  F3 mean        : {features[45]:.1f} Hz\n"
-    )
-
-    return f"""SLI AUDIO ANALYSIS REPORT
-==========================
-File: {fname}
-
-CLASSIFICATION RESULT:
-  Prediction : {label}
-  Severity   : {severity}
-  Confidence : {conf:.1f}%
-
-CLASS PROBABILITIES:
-{prob_lines}
-
-ACOUSTIC FEATURES (summary):
-{feat_summary}
-
-SPEECH TRANSCRIPTION:
-{transcription}
-
-NOTE: This analysis is generated by an automated machine-learning system
-trained on the LANNA Czech children's speech database (CTU Prague / Motol
-University Hospital).  Results should be reviewed by a qualified speech
-therapist.  This tool does NOT replace clinical assessment.
-"""
+def plot_severity_probs(severity_probs):
+    if not severity_probs: return None
+    order=["mild","moderate","severe"]; labels=["Mild","Moderate","Severe"]
+    probs=[severity_probs.get(k,0) for k in order]
+    fig,ax=plt.subplots(figsize=(5,2.5))
+    bars=ax.barh(labels,probs,color=["#eab308","#f97316","#dc2626"],edgecolor="white")
+    ax.set_xlim(0,1.2)
+    for bar,p in zip(bars,probs):
+        ax.text(bar.get_width()+0.01,bar.get_y()+bar.get_height()/2,
+                f"{p*100:.0f}%",va="center",fontsize=9)
+    ax.set_xlabel("Probability"); ax.set_title("Severity Classification")
+    fig.tight_layout(); return fig
